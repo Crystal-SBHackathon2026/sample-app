@@ -12,10 +12,17 @@ const info = {
 // 카나리 배포에서 에러율 기반 자동 롤백을 보여줄 때 사용한다.
 const failRate = Number(process.env.FAIL_RATE || 0);
 
+// 데모용 배포 실패 주입: true면 헬스체크가 실패해 새 버전이 준비되지 않는다.
+// 헬스체크 실패 시 자동 롤백을 보여줄 때 사용한다.
+const healthFail = process.env.HEALTH_FAIL === "true";
+
 function createApp() {
   const app = express();
 
-  app.get("/healthz", (req, res) => res.json({ status: "ok" }));
+  app.get("/healthz", (req, res) => {
+    if (healthFail) return res.status(503).json({ status: "fail" });
+    res.json({ status: "ok" });
+  });
 
   app.get("/api/info", (req, res) => {
     if (failRate > 0 && Math.random() < failRate) {
