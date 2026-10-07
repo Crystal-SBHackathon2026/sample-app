@@ -22,6 +22,7 @@ npm start   # http://localhost:8080
 | `DEPLOY_REGION` | busan-local / ap-northeast-2 / asia-northeast1 |
 | `APP_VERSION` | 표시할 버전 |
 | `FAIL_RATE` | 데모용 장애 주입 비율 (0~1). 카나리 자동 롤백 시연에 사용 |
+| `HEALTH_FAIL` | 데모용 배포 실패 주입 (`true`면 헬스체크 503). 헬스체크 자동 롤백 시연에 사용 |
 
 ## CI (GitHub Actions)
 테스트 → 이미지 빌드 → Trivy 취약점 검사 → (main) GHCR 푸시 → GitOps 레포 이미지 태그 갱신
