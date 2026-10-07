@@ -1,0 +1,79 @@
+# CI: 테스트 → 이미지 빌드 → 취약점 검사 → (main만) GHCR 푸시 → GitOps 레포 이미지 태그 갱신
+# CD는 Argo CD가 GitOps 레포 변경을 감지해 각 클러스터(로컬 k3s, EKS, GKE)에 배포한다.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  IMAGE: ghcr.io/crystal-sbhackathon2026/sample-app
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm test
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 이미지 빌드
+        run: docker build -t "$IMAGE:${{ github.sha }}" .
+
+      - name: 취약점 검사 (CRITICAL 발견 시 실패)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ env.IMAGE }}:${{ github.sha }}
+          severity: CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+
+      - name: GHCR 로그인
+        if: github.ref == 'refs/heads/main'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 이미지 푸시
+        if: github.ref == 'refs/heads/main'
+        run: |
+          docker tag "$IMAGE:${{ github.sha }}" "$IMAGE:latest"
+          docker push "$IMAGE:${{ github.sha }}"
+          docker push "$IMAGE:latest"
+
+  update-gitops:
+    needs: build
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    env:
+      GITOPS_TOKEN: ${{ secrets.GITOPS_TOKEN }}
+    steps:
+      - name: GitOps 레포 이미지 태그 갱신
+        if: env.GITOPS_TOKEN != ''
+        run: |
+          git clone "https://x-access-token:${GITOPS_TOKEN}@github.com/Crystal-SBHackathon2026/gitops.git"
+          cd gitops
+          sed -i "s/newTag: .*/newTag: ${{ github.sha }}/" apps/sample-app/base/kustomization.yaml
+          git config user.name "crystal-ci"
+          git config user.email "crystal-ci@users.noreply.github.com"
+          git commit -am "sample-app 이미지 태그 갱신: ${GITHUB_SHA::7}" || echo "변경 없음"
+          git push
+      - name: 토큰 없음 안내
+        if: env.GITOPS_TOKEN == ''
+        run: echo "GITOPS_TOKEN 시크릿이 없어 GitOps 갱신을 건너뜁니다."

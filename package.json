@@ -1,0 +1,14 @@
+{
+  "name": "sample-app",
+  "version": "0.1.0",
+  "private": true,
+  "description": "배포 시스템 데모용 샘플 웹앱 (어느 환경이 응답했는지 표시)",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test \"test/**/*.test.js\""
+  },
+  "dependencies": {
+    "express": "^4.21.2"
+  }
+}
