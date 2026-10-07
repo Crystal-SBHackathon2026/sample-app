@@ -72,7 +72,7 @@ jobs:
           sed -i "s/newTag: .*/newTag: ${{ github.sha }}/" apps/sample-app/base/kustomization.yaml
           git config user.name "crystal-ci"
           git config user.email "crystal-ci@users.noreply.github.com"
-          git commit -am "sample-app 이미지 태그 갱신: ${GITHUB_SHA::7}" || echo "변경 없음"
+          git commit -am "chore: sample-app 이미지 태그 갱신 (${GITHUB_SHA::7})" || echo "변경 없음"
           git push
       - name: 토큰 없음 안내
         if: env.GITOPS_TOKEN == ''
