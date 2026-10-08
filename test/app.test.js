@@ -26,3 +26,10 @@ test("/api/info는 배포 환경 정보를 돌려준다", async () => {
   assert.strictEqual(body.app, "sample-app");
   assert.ok(body.environment);
 });
+
+test("정보 응답에 기동 시각이 들어 있다", async () => {
+  const res = await fetch(`${base}/api/info`);
+  const body = await res.json();
+  assert.ok(body.startedAt, "startedAt 이 있어야 한다");
+  assert.ok(!Number.isNaN(Date.parse(body.startedAt)), "startedAt 은 파싱 가능한 시각이어야 한다");
+});
