@@ -6,6 +6,8 @@ const info = {
   version: process.env.APP_VERSION || "dev",
   environment: process.env.DEPLOY_ENV || "local",
   region: process.env.DEPLOY_REGION || "local",
+  // 컨테이너가 뜬 시각. 재배포·롤백이 실제로 일어났는지 화면에서 바로 확인한다.
+  startedAt: new Date().toISOString(),
 };
 
 // 데모용 장애 주입: 0~1 사이 비율로 /api 요청을 500으로 실패시킨다.
@@ -38,6 +40,7 @@ function createApp() {
   <h1>Crystal Sample App</h1>
   <p>응답한 환경: <b>${info.environment}</b> (${info.region})</p>
   <p>버전: <b>${info.version}</b></p>
+  <p>기동 시각: <b>${info.startedAt}</b></p>
 </body></html>`);
   });
 
