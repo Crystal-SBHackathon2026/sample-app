@@ -1,9 +1,4 @@
-# 배포 요청 명세 — 검토 서비스(review-service)가 PR 마다 이 파일을 검토한다.
-# 형식: https://github.com/Crystal-SBHackathon2026/review-service/blob/main/ai/docs/deploy-spec.md
-#
-# - 대상은 AWS EKS(oneaction) 하나다. 지금 gitops overlays/aws 와 같은 값을 적었다.
-# - 커밋 SHA·이미지 태그는 적지 않는다. 검토한 커밋은 검토 요청의 spec_ref 이고, 태그는 CI 가 gitops base 에 쓴다.
-# - 검토에서 고친 내용(포트·헬스체크·리소스 등)은 워커가 이 파일에 커밋해 PR 브랜치에 올린다.
+# 검토 서비스(review-service) 배포 명세 — 이 PR 의 deploy.yaml 을 AI 가 검토하고, 통과하면 gitops overlay 로 배포한다.
 api_version: crystal.review/v1alpha1
 kind: DeploySpec
 metadata:
@@ -15,7 +10,7 @@ target:
   namespace: sample-app
 image:
   repository: ghcr.io/crystal-sbhackathon2026/sample-app
-  platforms: [amd64]   # CI 가 ubuntu-latest 에서 docker build — EKS 노드도 amd64
+  platforms: [amd64]
 runtime:
   port: 8080
   replicas: 2
@@ -33,4 +28,4 @@ runtime:
 network:
   ingress:
     public: true
-    tls: false   # 도메인·인증서 전까지 ALB HTTP(80) — 검토에서 NET-001(low) 경고만 나온다
+    tls: false
