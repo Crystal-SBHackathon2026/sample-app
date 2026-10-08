@@ -18,6 +18,9 @@ const failRate = Number(process.env.FAIL_RATE || 0);
 // 헬스체크 실패 시 자동 롤백을 보여줄 때 사용한다.
 const healthFail = process.env.HEALTH_FAIL === "true";
 
+// 화면에는 커밋 앞 7자리만 보여준다. /api/info 는 전체 값을 돌려준다.
+const shortVersion = info.version.length === 40 ? info.version.slice(0, 7) : info.version;
+
 function createApp() {
   const app = express();
 
@@ -39,7 +42,7 @@ function createApp() {
 <body style="font-family:sans-serif;max-width:560px;margin:60px auto">
   <h1>Crystal Sample App</h1>
   <p>응답한 환경: <b>${info.environment}</b> (${info.region})</p>
-  <p>버전: <b>${info.version}</b></p>
+  <p>버전: <b>${shortVersion}</b></p>
   <p>기동 시각: <b>${info.startedAt}</b></p>
 </body></html>`);
   });
