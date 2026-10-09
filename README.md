@@ -4,9 +4,26 @@
 
 | 경로 | 설명 |
 | --- | --- |
-| `/` | 응답한 환경과 버전 표시 |
+| `/` | 응답한 환경·버전·기동 시각 표시 |
 | `/healthz` | 헬스체크 (Kubernetes probe, 배포 후 동작 확인) |
 | `/api/info` | 환경 정보 JSON |
+
+## PR 하나가 배포까지 가는 길
+
+이 레포에 PR을 올리면 사람 손 없이 배포까지 갑니다. 약 4분 20초 걸립니다.
+
+```
+PR 올림
+  → AI가 deploy.yaml 을 검토 (위험한 설정이면 막거나 고친다)
+  → 통과하면 커밋 상태 review-service/verify = success
+  → CI 통과 + 그 상태가 필수 체크라서 자동 병합
+  → 이미지 빌드 · Trivy 검사 · GHCR 푸시
+  → GitOps 레포의 이미지 태그 자동 갱신
+  → Argo CD가 30초 안에 감지
+  → 카나리 50% → 응답 확인 60초 → 100%
+```
+
+**검토를 통과하지 않은 커밋은 `main` 에 병합되지 않습니다.** 검토가 `needs_human` 으로 멈추거나 거절되면 상태가 `failure` 가 되고, 사람이 검토 없이 병합하려 해도 상태가 없어서 막힙니다.
 
 ## 실행
 ```bash
@@ -20,7 +37,7 @@ npm start   # http://localhost:8080
 | --- | --- |
 | `DEPLOY_ENV` | local / aws / gcp |
 | `DEPLOY_REGION` | busan-local / ap-northeast-2 / asia-northeast1 |
-| `APP_VERSION` | 표시할 버전 |
+| `APP_VERSION` | 표시할 버전. **직접 넣지 않아도 된다** — CI가 빌드할 때 커밋 SHA를 이미지에 구워 넣는다 (`Dockerfile` 의 `ARG GIT_SHA`) |
 | `FAIL_RATE` | 데모용 장애 주입 비율 (0~1). 카나리 자동 롤백 시연에 사용 |
 | `HEALTH_FAIL` | 데모용 배포 실패 주입 (`true`면 헬스체크 503). 헬스체크 자동 롤백 시연에 사용 |
 
@@ -43,6 +60,3 @@ npm start   # http://localhost:8080
 ## 배포 명세 (`deploy.yaml`)
 검토 서비스([review-service](https://github.com/Crystal-SBHackathon2026/review-service))가 PR 마다 읽어 검토하는 배포 요청 명세입니다.
 형식은 [deploy-spec.md](https://github.com/Crystal-SBHackathon2026/review-service/blob/main/ai/docs/deploy-spec.md) 를 따르고, 지금 값은 GitOps `overlays/aws` 와 같습니다.
-
-<!-- 검토 파이프라인 회귀 시험 ① (2026-10-09) -->
-<!-- 검토 파이프라인 확인: review-service#43 배포 후 (2026-10-09) -->
