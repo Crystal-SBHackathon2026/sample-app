@@ -26,6 +26,7 @@ runtime:
   env:
     DEPLOY_ENV: aws
     DEPLOY_REGION: ap-northeast-2
+    DB_PASSWORD: test-not-real
 network:
   ingress:
     public: true
