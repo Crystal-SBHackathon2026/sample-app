@@ -1,0 +1,39 @@
+# review-service 가 생성한 명세 — 값을 고쳐 커밋하면 다시 검토한다
+api_version: crystal.review/v1alpha1
+kind: DeploySpec
+metadata:
+  name: sample-app
+  repository: Crystal-SBHackathon2026/sample-app
+target:
+  env: aws
+  region: ap-northeast-2
+image:
+  repository: ghcr.io/crystal-sbhackathon2026/sample-app
+  platforms:
+  - amd64
+runtime:
+  port: 8080
+  replicas: 1
+  health:
+    readiness: /healthz
+    liveness: /healthz
+  resources:
+    cpu_request: 50m
+    memory_request: 64Mi
+    cpu_limit: 250m
+    memory_limit: 128Mi
+  env: {}
+  termination_grace_seconds: 30
+requirements:
+  persistence: false
+database:
+  engine: none
+  engine_policy: preserve
+  env_var: DATABASE_URL
+  backup_retention_days: 1
+  publicly_accessible: false
+secrets: []
+network: {}
+storage:
+  volumes: []
+  buckets: []
