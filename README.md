@@ -36,6 +36,8 @@ npm start   # http://localhost:8080
          → 멀쩡하면 100%, 계속 틀리면 중단하고 되돌림
 ```
 
+검토를 통과하지 않은 커밋은 `main` 에 병합되지 않습니다. 검토 결과가 커밋 상태 `review-service/verify` 로 기록되고, 그것이 브랜치 보호의 필수 체크입니다.
+
 화면의 **기동 시각**으로 파드가 실제로 교체됐는지 확인할 수 있습니다. 단계와 확인 기준은 GitOps 레포의 `apps/sample-app/base/` 에 있습니다.
 
 ## 배포 명세 (`deploy.yaml`)
