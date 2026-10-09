@@ -17,7 +17,6 @@ runtime:
   replicas: 2
   health:
     liveness: /healthz
-    readiness: /healthz
   resources:
     cpu_request: 50m
     memory_request: 64Mi
