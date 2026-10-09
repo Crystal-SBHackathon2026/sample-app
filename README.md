@@ -60,3 +60,5 @@ npm start   # http://localhost:8080
 ## 배포 명세 (`deploy.yaml`)
 검토 서비스([review-service](https://github.com/Crystal-SBHackathon2026/review-service))가 PR 마다 읽어 검토하는 배포 요청 명세입니다.
 형식은 [deploy-spec.md](https://github.com/Crystal-SBHackathon2026/review-service/blob/main/ai/docs/deploy-spec.md) 를 따르고, 지금 값은 GitOps `overlays/aws` 와 같습니다.
+
+<!-- review-service #48 회귀 확인 (2026-10-09) -->
