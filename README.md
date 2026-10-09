@@ -43,3 +43,4 @@ npm start   # http://localhost:8080
 형식은 [deploy-spec.md](https://github.com/Crystal-SBHackathon2026/review-service/blob/main/ai/docs/deploy-spec.md) 를 따르고, 지금 값은 GitOps `overlays/aws` 와 같습니다.
 
 <!-- 검토 파이프라인 회귀 시험 ① (2026-10-09) -->
+<!-- 검토 파이프라인 확인: review-service#43 배포 후 (2026-10-09) -->
