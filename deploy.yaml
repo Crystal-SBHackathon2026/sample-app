@@ -26,6 +26,9 @@ runtime:
   env:
     DEPLOY_ENV: aws
     DEPLOY_REGION: ap-northeast-2
+    # 일부러 넣은 장애. /api/info 요청의 30%를 500으로 실패시킨다.
+    # 카나리가 부분 에러율로 실제 중단되는지 확인하려고 넣었고, 확인 뒤 되돌린다.
+    FAIL_RATE: "0.3"
 network:
   ingress:
     public: true
