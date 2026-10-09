@@ -27,6 +27,17 @@ npm start   # http://localhost:8080
 ## CI (GitHub Actions)
 테스트 → 이미지 빌드 → Trivy 취약점 검사 → (main) GHCR 푸시 → GitOps 레포 이미지 태그 갱신
 
+## 배포 방식 (카나리)
+새 버전은 한 번에 전부 바뀌지 않습니다.
+
+```
+새 이미지 → 50% (복제본이 2개면 새 버전 1개 + 옛 버전 1개)
+         → 60초 동안 /api/info 응답 확인 (10초마다 6번)
+         → 멀쩡하면 100%, 계속 틀리면 중단하고 되돌림
+```
+
+화면의 **기동 시각**으로 파드가 실제로 교체됐는지 확인할 수 있습니다. 단계와 확인 기준은 GitOps 레포의 `apps/sample-app/base/` 에 있습니다.
+
 ## 배포 명세 (`deploy.yaml`)
 검토 서비스([review-service](https://github.com/Crystal-SBHackathon2026/review-service))가 PR 마다 읽어 검토하는 배포 요청 명세입니다.
 형식은 [deploy-spec.md](https://github.com/Crystal-SBHackathon2026/review-service/blob/main/ai/docs/deploy-spec.md) 를 따르고, 지금 값은 GitOps `overlays/aws` 와 같습니다.
