@@ -16,7 +16,6 @@ runtime:
   port: 8080
   replicas: 2
   health:
-    readiness: /healthz
     liveness: /healthz
   resources:
     cpu_request: 50m
