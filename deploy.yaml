@@ -1,4 +1,4 @@
-# 검토 서비스(review-service) 배포 명세 — 이 PR 의 deploy.yaml 을 AI 가 검토하고, 통과하면 gitops overlay 로 배포한다.
+# review-service 가 형식 오류를 고친 명세 — 원문 주석은 지워졌다. 값을 고쳐 커밋하면 다시 검토한다
 api_version: crystal.review/v1alpha1
 kind: DeploySpec
 metadata:
@@ -10,7 +10,8 @@ target:
   namespace: sample-app
 image:
   repository: ghcr.io/crystal-sbhackathon2026/sample-app
-  platforms: [amd64]
+  platforms:
+  - amd64
 runtime:
   port: 8080
   replicas: 2
