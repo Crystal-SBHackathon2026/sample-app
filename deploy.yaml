@@ -1,4 +1,4 @@
-# review-service 가 형식 오류를 고친 명세 — 원문 주석은 지워졌다. 값을 고쳐 커밋하면 다시 검토한다
+# AI 검토 rv_20261009_59cd5a99 가 고친 명세입니다. 무엇을 왜 고쳤는지는 검토 결과(rounds)에 있습니다.
 api_version: crystal.review/v1alpha1
 kind: DeploySpec
 metadata:
@@ -16,8 +16,8 @@ runtime:
   port: 8080
   replicas: 2
   health:
-    readiness: /healthz
     liveness: /healthz
+    readiness: /healthz
   resources:
     cpu_request: 50m
     memory_request: 64Mi
