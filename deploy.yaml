@@ -13,7 +13,7 @@ image:
   platforms: [amd64]
 runtime:
   port: 8080
-  replicas: 2
+   replicas: 2
   health:
     readiness: /healthz
     liveness: /healthz
