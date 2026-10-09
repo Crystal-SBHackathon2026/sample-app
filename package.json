@@ -9,6 +9,7 @@
     "test": "node --test \"test/**/*.test.js\""
   },
   "dependencies": {
+    "@prometheus-io/client": "^0.16.1",
     "express": "^4.21.2"
   }
 }

@@ -7,10 +7,11 @@
 | `/` | 응답한 환경·버전·기동 시각 표시 |
 | `/healthz` | 헬스체크 (Kubernetes probe, 배포 후 동작 확인) |
 | `/api/info` | 환경 정보 JSON |
+| `/metrics` | 프로메테우스 지표 (요청 수·지연·프로세스 상태) |
 
 ## PR 하나가 배포까지 가는 길
 
-이 레포에 PR을 올리면 사람 손 없이 배포까지 갑니다. 약 4분 20초 걸립니다.
+이 레포에 PR을 올리면 사람 손 없이 배포까지 갑니다. 약 5분 20초 걸립니다.
 
 ```
 PR 올림
@@ -56,6 +57,26 @@ npm start   # http://localhost:8080
 검토를 통과하지 않은 커밋은 `main` 에 병합되지 않습니다. 검토 결과가 커밋 상태 `review-service/verify` 로 기록되고, 그것이 브랜치 보호의 필수 체크입니다.
 
 화면의 **기동 시각**으로 파드가 실제로 교체됐는지 확인할 수 있습니다. 단계와 확인 기준은 GitOps 레포의 `apps/sample-app/base/` 에 있습니다.
+
+## 지표 (`/metrics`)
+
+Grafana 의 `apps/` 폴더에서 봅니다. 30초마다 긁습니다.
+
+| 이름 | 무엇 |
+| --- | --- |
+| `http_requests_total` | 요청 수. 라벨 `method` · `route` · `status` |
+| `http_request_duration_seconds` | 요청 처리 시간 (히스토그램) |
+| `process_*` · `nodejs_*` | 힙, 이벤트 루프 지연, CPU 등 기본 지표 |
+
+세 가지를 일부러 그렇게 했습니다.
+
+- **라벨에 커밋 SHA 를 넣지 않습니다.** 넣으면 배포마다 시계열이 새로 생겨 Prometheus 메모리를 먹습니다. "지금 뜬 게 어느 커밋인지"는 `kube_pod_container_info` 의 이미지 태그로 봅니다
+- **경로는 매칭된 라우트 이름만** 씁니다. 들어온 URL 을 그대로 쓰면 없는 경로를 긁는 요청 하나하나가 새 시계열이 됩니다. 매칭 안 되면 `route="unmatched"` 하나로 모입니다
+- **`/metrics` 자체는 세지 않습니다.** 30초마다 긁히니 세면 에러율·지연 계산을 전부 덮어씁니다
+
+앱 포트와 **같은 포트**로 냅니다. `deploy.yaml` 의 `runtime.port` 는 하나뿐이고 overlay 는 렌더러가 다시 만들기 때문에, 포트를 더 뚫으려면 명세 형식부터 바꿔야 합니다. 공개 주소로도 열리지만 나가는 값은 숫자뿐입니다.
+
+`FAIL_RATE` 로 장애를 주입하면 `status="500"` 으로 세어지므로, 에러율로 카나리를 중단시키는 것(GitOps `#24`)을 이 지표로 시험할 수 있습니다.
 
 ## 배포 명세 (`deploy.yaml`)
 검토 서비스([review-service](https://github.com/Crystal-SBHackathon2026/review-service))가 PR 마다 읽어 검토하는 배포 요청 명세입니다.

@@ -1,4 +1,5 @@
 const express = require("express");
+const { createMetrics } = require("./metrics");
 
 // 배포 환경 정보: 어느 서버(클라우드)가 응답했는지 화면에서 바로 보이게 한다.
 const info = {
@@ -23,6 +24,17 @@ const shortVersion = info.version.length === 40 ? info.version.slice(0, 7) : inf
 
 function createApp() {
   const app = express();
+
+  // 지표 수집은 모든 라우트보다 먼저 붙인다. 404 도 세야 "없는 경로를 긁고 있다"가 보인다.
+  const metrics = createMetrics({ app: info.app, environment: info.environment });
+  app.use(metrics.middleware);
+
+  // 앱 포트와 같은 포트로 낸다. deploy.yaml 의 runtime.port 는 하나뿐이고,
+  // overlay 는 렌더러가 다시 만들기 때문에 포트를 더 뚫으려면 명세부터 바꿔야 한다.
+  app.get("/metrics", async (req, res) => {
+    res.set("Content-Type", metrics.register.contentType);
+    res.send(await metrics.register.metrics());
+  });
 
   app.get("/healthz", (req, res) => {
     if (healthFail) return res.status(503).json({ status: "fail" });
