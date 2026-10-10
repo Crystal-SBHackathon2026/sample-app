@@ -26,9 +26,6 @@ runtime:
   env:
     DEPLOY_ENV: aws
     DEPLOY_REGION: ap-northeast-2
-    # ⚠️ 시험용. 확인 즉시 지우는 PR 을 올린다.
-    # /api/info 요청의 30% 를 500 으로 실패시켜 카나리 에러율 중단을 확인한다.
-    FAIL_RATE: "0.3"
 network:
   ingress:
     public: true
