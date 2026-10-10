@@ -1,4 +1,4 @@
-# AI 검토 rv_20261009_59cd5a99 가 고친 명세입니다. 무엇을 왜 고쳤는지는 검토 결과(rounds)에 있습니다.
+# AI 검토 rv_20261010_a1169058 가 고친 명세입니다. 무엇을 왜 고쳤는지는 검토 결과(rounds)에 있습니다.
 api_version: crystal.review/v1alpha1
 kind: DeploySpec
 metadata:
@@ -26,8 +26,7 @@ runtime:
   env:
     DEPLOY_ENV: aws
     DEPLOY_REGION: ap-northeast-2
-    FAIL_RATE: "0.3"
-    APP_NOTICE: "v2"
+    FAIL_RATE: '0.3'
 network:
   ingress:
     public: true
