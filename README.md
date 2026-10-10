@@ -83,3 +83,4 @@ Grafana 의 `apps/` 폴더에서 봅니다. 30초마다 긁습니다.
 형식은 [deploy-spec.md](https://github.com/Crystal-SBHackathon2026/review-service/blob/main/ai/docs/deploy-spec.md) 를 따르고, 지금 값은 GitOps `overlays/aws` 와 같습니다.
 
 <!-- review-service #48 회귀 확인 (2026-10-09) -->
+<!-- gitops #46 환경별 분석 적용 뒤 카나리 확인 (2026-10-10) -->
