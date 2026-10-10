@@ -44,29 +44,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: docker/setup-buildx-action@v3
-
-      # 레이어 캐시를 GitHub Actions 캐시에 둔다 (#29 ①).
-      # Dockerfile 이 `COPY package*.json` → `npm ci` → `COPY src` 순서라
-      # 의존성이 안 바뀌면 npm 층과 베이스 이미지가 재사용된다.
-      # PR 빌드가 캐시를 채우고 병합 뒤 main 빌드가 그것을 쓰는 것이 본래 이득이다.
-      #
-      # 🔴 load: true 가 필요하다. Trivy 가 **로컬 이미지**를 스캔하고,
-      #    스캔을 통과한 뒤에 푸시하는 순서를 유지해야 한다
-      #    (push: true 로 하면 취약점이 있는 이미지가 이미 올라가 있게 된다).
-      #
-      # ignore-error 를 둔 이유: 캐시 내보내기가 실패해도 빌드는 성공해야 한다.
-      # 내일 데모가 이 파이프라인에 걸려 있어서 캐시 때문에 깨지면 안 된다.
       - name: 이미지 빌드
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          load: true
-          push: false
-          tags: ${{ env.IMAGE }}:${{ github.sha }}
-          build-args: GIT_SHA=${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max,ignore-error=true
+        run: docker build --build-arg GIT_SHA=${{ github.sha }} -t "$IMAGE:${{ github.sha }}" .
 
       - name: 취약점 검사 (CRITICAL 발견 시 실패)
         uses: aquasecurity/trivy-action@v0.36.0
