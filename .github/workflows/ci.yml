@@ -47,7 +47,17 @@ jobs:
       - name: 이미지 빌드
         run: docker build --build-arg GIT_SHA=${{ github.sha }} -t "$IMAGE:${{ github.sha }}" .
 
+      # 🔴 PR 에서만 스캔한다 (#29). main 에서는 건너뛴다.
+      #
+      # 단계별 실측에서 Trivy 가 9초로 가장 큰 단계였고, docker build 는 5초였다.
+      # squash 머지라 main 트리는 PR 트리와 내용이 같고, 이미지 차이는
+      # --build-arg GIT_SHA 하나뿐이다. **설치되는 패키지가 동일하므로**
+      # PR 스캔으로 취약점 판단이 끝난다.
+      #
+      # 브랜치 보호가 build 를 필수 체크로 요구하므로, PR 에서 CRITICAL 이 나오면
+      # 병합 자체가 막힌다. 즉 취약한 이미지는 main 에 오지 못한다.
       - name: 취약점 검사 (CRITICAL 발견 시 실패)
+        if: github.ref != 'refs/heads/main'
         uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: ${{ env.IMAGE }}:${{ github.sha }}
@@ -63,12 +73,11 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # latest 태그는 더 쓰지 않는다 (#29). 레포 셋을 뒤져도 참조가 없었고,
+      # 배포는 gitops 의 newTag(= 병합 커밋 SHA)로만 한다. 푸시 한 번을 아낀다.
       - name: 이미지 푸시
         if: github.ref == 'refs/heads/main'
-        run: |
-          docker tag "$IMAGE:${{ github.sha }}" "$IMAGE:latest"
-          docker push "$IMAGE:${{ github.sha }}"
-          docker push "$IMAGE:latest"
+        run: docker push "$IMAGE:${{ github.sha }}"
 
       # GitOps 태그 갱신을 이 job 안에서 한다 (#29 ③).
       # 전에는 별도 job(update-gitops)이라 러너를 새로 띄우는 데만 10초 넘게 걸렸고,
