@@ -26,7 +26,4 @@ runtime:
   env:
     DEPLOY_ENV: aws
     DEPLOY_REGION: ap-northeast-2
-network:
-  ingress:
-    public: true
-    tls: false
+network: {}
