@@ -52,7 +52,7 @@ function createApp() {
     res.send(`<!doctype html>
 <html lang="ko"><head><meta charset="utf-8"><title>Crystal Sample App</title></head>
 <body style="font-family:sans-serif;max-width:560px;margin:60px auto">
-  <h1>Crystal Sample App</h1>
+  <h1>Crystal Sample App v2</h1>
   <p>응답한 환경: <b>${info.environment}</b> (${info.region})</p>
   <p>버전: <b>${shortVersion}</b></p>
   <p>기동 시각: <b>${info.startedAt}</b></p>
