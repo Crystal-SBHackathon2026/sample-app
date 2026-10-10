@@ -1,2 +1,6 @@
 node_modules/
 .env
+
+# Python tooling
+__pycache__/
+*.py[cod]
