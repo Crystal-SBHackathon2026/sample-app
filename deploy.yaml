@@ -26,7 +26,13 @@ runtime:
   env:
     DEPLOY_ENV: aws
     DEPLOY_REGION: ap-northeast-2
+    FAIL_RATE: "0.3"
+    APP_NOTICE: "v2"
 network:
   ingress:
     public: true
     tls: false
+secrets:
+- name: APP_NOTICE
+  source: k8s-secret
+  key: app-notice
