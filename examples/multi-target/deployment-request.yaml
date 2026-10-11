@@ -1,0 +1,15 @@
+apiVersion: oneaction/v1
+kind: DeploymentRequest
+targets:
+- env: aws
+  region: ap-northeast-2
+  cluster: in-cluster
+  path: deploy/aws.yaml
+- env: gcp
+  region: asia-northeast1
+  cluster: tokyo-gke
+  path: deploy/gcp.yaml
+- env: local
+  region: busan-local
+  cluster: crystal-busan
+  path: deploy/local.yaml
