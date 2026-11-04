@@ -216,7 +216,9 @@ async function createTrafficBot({adapter, ledgerDir, ratePerSecond = 1,
     try {
       if (await resolveByRead(entry)) return;
     } catch (error) {
-      if (error.code === 'CONTENT_CONFLICT') return failOrRetry(entry, error);
+      if (error.terminal && error.code === 'CONTENT_CONFLICT') {
+        return failOrRetry(entry, error, true);
+      }
     }
     if (!stopped) {
       await ledger.update(entry.request.request_id, {state: 'unknown',
@@ -239,7 +241,7 @@ async function createTrafficBot({adapter, ledgerDir, ratePerSecond = 1,
       try {
         if (await resolveByRead(entry)) return;
       } catch (error) {
-        return failOrRetry(entry, error);
+        return failOrRetry(entry, error, Boolean(error.terminal));
       }
     }
     if (entry.attempts >= maxAttempts) {
@@ -274,8 +276,10 @@ async function createTrafficBot({adapter, ledgerDir, ratePerSecond = 1,
     try {
       if (await resolveByRead(entry, observation)) return;
     } catch (error) {
+      // Only validation of the GET record can prove a content conflict.
       return failOrRetry(entry,
-          error.code === 'CONTENT_CONFLICT' || !postError ? error : postError);
+          error.code === 'CONTENT_CONFLICT' || !postError ? error : postError,
+          Boolean(error.terminal));
     }
     return failOrRetry(entry, postError || codedError('READ_NOT_FOUND'));
   }
@@ -291,33 +295,42 @@ async function createTrafficBot({adapter, ledgerDir, ratePerSecond = 1,
           {attempts: refunded.attempts});
       return failOrRetry(refunded, error);
     }
-    // Explicit refusals are final; anything after a response is unconfirmed.
-    if (error.terminal && !error.afterResponse) {
-      return failOrRetry(entry, error);
+    // This refusal proves only this POST did not commit. With no prior
+    // uncertain POST (pause refunds excluded), it also settles the request.
+    if (entry.attempts === 1 && error.terminal && !error.afterResponse) {
+      return failOrRetry(entry, error, true);
     }
     try {
       if (await resolveByRead(entry)) return;
     } catch (cause) {
-      if (cause.code === 'CONTENT_CONFLICT') return failOrRetry(entry, cause);
+      if (cause.terminal && cause.code === 'CONTENT_CONFLICT') {
+        return failOrRetry(entry, cause, true);
+      }
     }
     return failOrRetry(entry, error);
   }
 
-  async function failOrRetry(entry, error) {
+  async function failOrRetry(entry, error, confirmedFailure = false) {
     if (stopped) return;
     // Adapter errors are untrusted and may contain secrets; persist fixed
     // codes.
     const safeCodes = ['RESPONSE_INVALID', 'CONTENT_CONFLICT',
       'INVALID_JSON_RESPONSE', 'RESPONSE_TOO_LARGE', 'HTTP_TRANSPORT_ERROR',
       'REQUEST_ABORTED', 'WRITES_PAUSED'];
-    const failed = Boolean(error.terminal) && !error.afterResponse;
+    // The caller identifies proof from the first POST or a validated GET.
+    // A later POST refusal or any GET failure cannot settle prior writes.
+    const failed = confirmedFailure;
     const code = safeCodes.includes(error.code) ||
       /^HTTP_[0-9]{3}$/.test(error.code || '') ? error.code :
       (failed ? 'PERMANENT_REQUEST_FAILURE' : 'TRANSIENT_REQUEST_FAILURE');
+    const now = Date.now();
+    const retryAfterMs = Number.isFinite(error.retryAfterMs) &&
+        error.retryAfterMs >= 0 ? Math.ceil(error.retryAfterMs) : 0;
+    const retryInMs = Math.min(maxRequestAgeMs, Number.MAX_SAFE_INTEGER - now,
+        Math.max(retryDelayMs, retryAfterMs));
     await ledger.update(entry.request.request_id, {
       state: failed ? 'failed' : 'pending', lastError: code,
-      nextAttemptAt: Date.now() + Math.min(maxRequestAgeMs,
-          Math.max(retryDelayMs, error.retryAfterMs || 0)),
+      nextAttemptAt: now + retryInMs,
       ...(failed ? {completedAt: Date.now()} : {}),
     });
   }

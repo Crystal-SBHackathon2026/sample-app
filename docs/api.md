@@ -91,7 +91,9 @@ RFC 6750 범위: Authorization 헤더 방식과 3절 challenge 형식만 따른�
 *   open과 closed는 시작할 때 warn 로그를 한 번 남긴다. enforced는 남기지
     않는다. 요청마다 로그를 남기지 않는다.
 
-봇 해석: 401은 POST가 DB에 닿지 않았으므로 즉시 failed(`HTTP_401`)다.
+봇 해석: 첫 POST의 401은 해당 POST가 DB에 닿지 않아 즉시 failed(`HTTP_401`)다.
+이전 미확정 POST가 있으면 나중 POST나 복구 GET의 401로 요청 전체를 실패로
+확정하지 않는다. 같은 ID 조회로 확인하거나 상한에서 unknown으로 보존한다.
 closed 503은 `WRITES_PAUSED`가 아니어서 일반 503처럼 같은 ID GET과 재시도로
 확인한다. closed에서는 GET도 503이므로 예산을 다 쓰면 실제로는 커밋되지
 않았어도 unknown으로 남는다.
@@ -136,7 +138,11 @@ libpq의 require(검증 없음)와 verify-ca(호스트명 미검증)보다 강�
 DB_SSL_CA, RDS CA는 외부 주입)로 검증돼야 하고 SAN이 접속 호스트와 맞아야
 한다. 이 문서는 정책이며 실제 운영 DB의 TLS 접속 검증을 대신하지 않는다.
 코어에 직접 넘기는 ssl은 true, false, 미지정, 인증서를 검증하는 객체만 받고
-나머지는 INVALID_CONFIGURATION으로 거절한다(모듈 README).
+나머지는 초기 INVALID_CONFIGURATION, 교체 DB_UNAVAILABLE로 거절한다(모듈 README).
+ssl 객체의 checkServerIdentity와 servername·host·socket 지정도 거절한다.
+Node의 servername → host → socket._host 선택과 pg 옵션 병합에서 검증·연결
+대상을 바꾸지 못하게 한다. 초기·교체·pg.defaults 모두 own/inherited 속성과
+undefined 지정에 적용하며, 접속 IP의 인증서 비교 대상도 바꿀 수 없다.
 DB 구현(createPostgresRequestStore, postgresOptionsFromEnv)은 기본 export에,
 스키마 SQL은 /schema.sql export에 있다.
 스키마는 앱 시작에서 자동 생성하지 않고 관리자 작업으로 사전 적용한다.
@@ -149,8 +155,10 @@ read(id,options)를 구현한 adapter를 주입하거나 요청 경로를 변경
 응답 record를 원래 요청 전체와 비교해야 committed로 기록한다.
 
 요청 생성→영속 ledger 기록→HTTP 쓰기→같은 ID 조회 확인 순서다.
-응답 유실·일반503은 같은 ID로 조회/재시도한다. POST 409와 명시적 4xx
-거절(408·425·429 제외)은 즉시 영구 실패다. 2xx를 받은 뒤의 해석 오류·크기
+응답 유실·일반503은 같은 ID로 조회/재시도한다. 이전 미확정 POST가 없는
+POST 409와 명시적 4xx 거절(408·425·429 제외)은 즉시 영구 실패다.
+이전 POST가 미확정이면 후속 거절은 해당 시도에만 적용하며 조회로 판정한다.
+2xx를 받은 뒤의 해석 오류·크기
 초과·내용 불일치는 커밋 미확정이므로 같은 ID GET으로 판정한다. GET이 같은
 요청이면 committed, 다른 내용이면 CONTENT_CONFLICT로 failed, 없음·오류면
 pending이고 예산을 다 쓰면 unknown이다.
@@ -158,6 +166,9 @@ pending이고 예산을 다 쓰면 unknown이다.
 재시작 후 pending 요청을 먼저 처리한다. ledger는 단일 writer 락을 사용한다.
 1초 요약은 stdout JSON, /metrics는 Prometheus, 원본 payload는 합성 데이터만.
 CLI 환경변수와 공개 함수는 모듈 README에 기록한다.
+adapter 오류의 retryAfterMs는 유한한 0 이상 숫자이며 소수 밀리초는 올림한다.
+잘못된 값은 무시하고 지연은 retryDelayMs, maxRequestAgeMs 및 안전한 정수
+시각 범위로 제한한다. HTTP Retry-After도 정수 밀리초로 정규화한다.
 
 ## 입력 한도
 

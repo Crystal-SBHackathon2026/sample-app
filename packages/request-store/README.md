@@ -150,10 +150,15 @@ URL의 `sslmode`는 helper가 제거해 명시적인 검증 설정으로 바꾼�
 
 코어가 받는 `ssl`은 `true`, `false`, 미지정, 인증서를 검증하는 객체뿐이다.
 `'no-verify'` 같은 문자열, `null`, 숫자, 배열은 거절한다.
-`rejectUnauthorized`가 `true`가 아니거나 `checkServerIdentity`를 바꾸는
+`rejectUnauthorized`가 `true`가 아니거나 `checkServerIdentity`를 지정하는
 객체도 거절한다. `ssl`을 생략하면 드라이버가 대신 읽는
 `PGSSLMODE=no-verify`와 `pg.defaults.ssl`도 같은 규칙으로 검사한다.
-거절은 모두 `INVALID_CONFIGURATION`이다. URL로 해석되지 않는 접속 문자열도
+초기 설정의 거절은 `INVALID_CONFIGURATION`, 교체 시 거절은 `DB_UNAVAILABLE`이다.
+접속 IP도 인증서 비교 대상이므로 다른 DNS 이름으로 바꿀 수 없다.
+Node가 `servername` → `host` → `socket._host` 순서로 검증 대상을 고르고
+pg가 SSL 옵션을 병합하므로 `ssl.servername`·`ssl.host`·`ssl.socket`도 거절한다.
+초기·교체·드라이버 기본값 모두 own/inherited 속성과 `undefined` 지정에 적용한다.
+URL로 해석되지 않는 접속 문자열도
 원문을 메시지·속성·cause에 남기지 않는 같은 오류로 거절한다.
 
 `require`, `verify-ca`, `verify-full`은 모두 인증서 체인 검증과 Node 기본

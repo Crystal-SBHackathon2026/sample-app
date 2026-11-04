@@ -40,11 +40,14 @@ function verifiedTls(ssl) {
   const effective = ssl === undefined ? driverDefaultSsl() : ssl;
   if (effective === false) return false;
   if (effective === true) return {rejectUnauthorized: true};
+  // pg merges SSL options into tls.connect. Node selects the peer identity
+  // from servername, host, then socket._host; the connection owns that target.
   const verifies = effective !== null && typeof effective === 'object' &&
       !Array.isArray(effective) &&
       (!('rejectUnauthorized' in effective) ||
           effective.rejectUnauthorized === true) &&
-      !('checkServerIdentity' in effective);
+      !('checkServerIdentity' in effective) &&
+      !['servername', 'host', 'socket'].some((key) => key in effective);
   if (!verifies) {
     throw invalidConfiguration(
         'TLS certificate verification must remain enabled');

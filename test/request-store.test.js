@@ -369,7 +369,8 @@ function runTlsProbe(arg, env = {}) {
 
 /** Both pools of the probe resolved to verified TLS with this CA. */
 function verifiedPools(ca = null) {
-  const pool = {rejectUnauthorized: true, ca};
+  const pool = {rejectUnauthorized: true, ca, host: 'db.invalid',
+    identityHost: 'db.invalid'};
   return {initial: pool, replacement: pool};
 }
 
@@ -392,6 +393,105 @@ test('real pg TLS upgrade stays verified when Node TLS checks are off',
         const label = `PGSSLMODE=${mode} ssl=${sslJson}`;
         assert.equal(run.status, 0, `${label}: ${run.stderr}`);
         assert.deepEqual(JSON.parse(run.stdout), expected, label);
+      }
+    });
+
+test('IP TLS rejects identity and socket overrides at all pool entries',
+    async (t) => {
+      const connectionString = 'postgres://probe:probe@127.0.0.1/demo';
+      const {defaults} = require('pg');
+      const saved = {ssl: defaults.ssl, mode: process.env.PGSSLMODE};
+      const ca = require('node:tls').rootCertificates[0];
+      delete process.env.PGSSLMODE;
+      try {
+        for (const key of ['servername', 'host', 'socket']) {
+          await t.test(key, async () => {
+            for (const inherited of [false, true]) {
+              for (const defined of [false, true]) {
+                // No real socket is needed: reject before any pool or TLS
+                // upgrade can use this socket-shaped sentinel.
+                const value = !defined ? undefined : key === 'socket' ?
+                  {_host: 'tls-review.invalid',
+                    on() { assert.fail('socket must not be used'); }} :
+                  'tls-review.invalid';
+                const override = {[key]: value};
+                const ssl = inherited ? Object.create(override) : override;
+                ssl.ca = ca;
+                defaults.ssl = ssl;
+                const label = `${key}, inherited=${inherited}, ` +
+                    `defined=${defined}`;
+                let pools = 0;
+                const poolFactory = () => {
+                  pools++;
+                  return {on() {}, query: async () => ({rows: []}),
+                    end: async () => {}};
+                };
+                assert.throws(() => createPostgresRequestStore({
+                  connectionString, ssl, poolFactory,
+                }), {code: 'INVALID_CONFIGURATION'}, label);
+                assert.throws(() => createPostgresRequestStore({
+                  connectionString, poolFactory,
+                }), {code: 'INVALID_CONFIGURATION'}, label);
+                assert.equal(pools, 0);
+                const store = createPostgresRequestStore({connectionString,
+                  ssl: {ca}, poolFactory});
+                try {
+                  await store.pauseWrites();
+                  await assert.rejects(store.replaceConnection({
+                    connectionString, ssl,
+                  }), {code: 'DB_UNAVAILABLE'}, label);
+                  await assert.rejects(store.replaceConnection({
+                    connectionString,
+                  }), {code: 'DB_UNAVAILABLE'}, label);
+                  assert.equal(pools, 1);
+                } finally {
+                  await store.close();
+                }
+              }
+            }
+          });
+        }
+      } finally {
+        defaults.ssl = saved.ssl;
+        if (saved.mode === undefined) {
+          delete process.env.PGSSLMODE;
+        } else {
+          process.env.PGSSLMODE = saved.mode;
+        }
+      }
+    });
+
+test('real pg IP TLS upgrade preserves valid CA and rejects identity override',
+    () => {
+      const ca = require('node:tls').rootCertificates[0];
+      const arg = JSON.stringify({ca});
+      const env = {PROBE_HOST: '127.0.0.1'};
+      const run = runTlsProbe(arg, env);
+      assert.equal(run.status, 0, run.stderr);
+      const pool = {ca, rejectUnauthorized: true, servername: null,
+        host: '127.0.0.1', identityHost: '127.0.0.1'};
+      assert.deepEqual(JSON.parse(run.stdout),
+          {initial: pool, replacement: pool});
+      const fromDefaults = runTlsProbe('--from-defaults', {...env,
+        PROBE_DEFAULT_SSL: arg});
+      assert.equal(fromDefaults.status, 0, fromDefaults.stderr);
+      assert.deepEqual(JSON.parse(fromDefaults.stdout),
+          {initial: pool, replacement: pool});
+      for (const key of ['servername', 'host', 'socket']) {
+        const input = {ca};
+        input[key] = key === 'socket' ? {_host: 'tls-review.invalid'} :
+          'tls-review.invalid';
+        const override = JSON.stringify(input);
+        for (const [initial, extra, code] of [
+          [override, {}, 'INVALID_CONFIGURATION'],
+          [arg, {PROBE_REPLACEMENT_SSL: override}, 'DB_UNAVAILABLE'],
+          ['--from-defaults', {PROBE_DEFAULT_SSL: override},
+            'INVALID_CONFIGURATION'],
+        ]) {
+          const refused = runTlsProbe(initial, {...env, ...extra});
+          assert.equal(refused.status, 1, key);
+          assert.equal(refused.stderr.trim(), code, key);
+        }
       }
     });
 

@@ -137,12 +137,15 @@ review-service 카탈로그를 바꿔야 하며 이 작업의 범위 밖이다.
   설정이나 Secret을 바꾸면 재시작해야 반영된다.
 - `app_request_api_auth_rejected_total{reason}`은 `unauthorized`(401)와
   `unconfigured`(503) 거절 수다. 요청마다 로그를 남기지 않는다.
-- 봇 토큰이 틀리면 요청마다 `failed`·`HTTP_401`이 된다.
+- 이전 미확정 POST가 없는 첫 POST는 토큰이 틀리면 `failed`·`HTTP_401`이 된다.
+  이전 POST가 미확정이면 후속 POST나 복구 GET의 401로 실패를 확정하지 않는다.
+  `pending`을 보존하며 재조회하고 상한에서 `unknown`으로 남긴다.
   `traffic_bot_requests_total{state="failed"}`가 늘면 토큰부터 본다. 1건/s면
   약 2시간 47분에 10000건 상한이 찬다.
 - 앱이 closed면 봇은 503을 모호한 응답으로 보고 GET으로 확인한다. 확인하지
   못하면 `pending`을 거쳐 예산이 끝날 때 `unknown`이 된다. 이 `unknown`은
-  커밋 여부를 확인하지 못했다는 뜻이고, 실제로는 커밋되지 않았다. `unknown`이
+  커밋 여부를 확인하지 못했다는 뜻이다. closed 전 수락된 POST는 늦게 커밋될
+  수 있으므로 미저장을 단정하지 않고 수동 정합성 확인 대상으로 보존한다. `unknown`이
   늘면 Pod마다 `mode="closed"`와 Secret 존재부터 확인한다.
 
 ### 9단계 전 선행 조건

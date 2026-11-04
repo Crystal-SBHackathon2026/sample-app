@@ -76,6 +76,8 @@ function createHttpAdapter({baseUrl, requestsPath = '/api/requests',
       if (!Number.isFinite(retryAfterMs)) {
         retryAfterMs = Math.max(0, Date.parse(value) - Date.now()) || 0;
       }
+      retryAfterMs = Math.min(Number.MAX_SAFE_INTEGER,
+          Math.max(0, Math.ceil(retryAfterMs)));
       // Only the explicit pause contract proves this POST did not store data.
       // Never retain or log arbitrary error bodies from the remote service.
       let notCommitted = false;

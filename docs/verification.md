@@ -186,3 +186,80 @@ Bearer의 401 응답, ALB와 Pod 사이 평문 구간이 남는다.
 
 claude-mem은 이 Codex 작업에서 사용하지 않았으며 git/로컬 작업 기록으로 대체했다.
 하네스는 프로젝트 범위에 설치했고 전역 설정은 변경하지 않았다.
+
+## PR R1 제품 지적 세 건 보완 — 2026-11-04
+
+기준 HEAD는 `8207ef51388d54d3410cceddf1f5bcbd1dfe61a1`이다. 사전 기록
+`verify-sol-r1-high.md.meta.json`의 `finished`, exit 0과 H 재현 판정을
+확인한 뒤 수정했다. 아래는 미커밋 보완의 새 결과이며, 이전 C3·CI의
+167/167 결과를 이번 소스의 실행 결과로 재사용하지 않는다.
+증거는 `_workspace/recheck-20261104/phase3/sol-pr1-fixes/`에 있다.
+
+| 지적 | 원인과 처분 | 회귀 근거 |
+| --- | --- | --- |
+| H `SOL-PR1-H01` | 후속 POST의 거절을 요청 전체의 미저장 증거로 사용했다. 첫 POST의 확실한 거절과 검증된 GET의 내용 충돌만 실패를 확정한다. 나머지는 조회 후 pending, 상한에서 unknown으로 보존한다. | `prior uncertain POST survives later refusals and recovers late COMMIT`, `recovery GET 401 cannot settle an uncertain POST; age ends unknown`, `later POST refusals stop at attempt cap after final GET` |
+| M `SOL-PR1-M01` | 외부 지연의 소수·비정상 값과 시각 덧셈이 재시작 검증을 깨뜨렸다. 유한한 0 이상 숫자는 밀리초 올림, 나머지는 무시한다. 지연은 기존 하한·시간 상한과 safe integer 덧셈 범위로 제한한다. HTTP 파서도 정규화한다. | `SDK retryAfterMs always persists a safe schedule that reopens`, `HTTP Retry-After parser returns safe nonnegative milliseconds` |
+| M `SOL-R1-M01` | IP 접속에서 중첩 ssl.servername이 인증서 비교 대상을 바꿨다. 초기·교체 공통 verifiedTls에서 지정 자체를 거절한다. 직접 SDK 입력 경계의 M 분류를 유지한다. HTTP·env 우회가 발견됐다는 뜻은 아니다. | `IP TLS rejects servername overrides at entry, replace and defaults`, `real pg IP TLS upgrade preserves valid CA and rejects identity override` |
+
+`attempts`는 전송 전에 영속 증가하며, 확실한 `WRITES_PAUSED` 응답에 한해서
+그 시도만 환불한다. 이전 미확정 시도는 후속 거절·환불로 지우지 않는다.
+ledger 필드·버전·상태 집합은 추가하지 않았다. 첫 POST 단독 400·409,
+pause 뒤 첫 확실한 거절, 잘못된 2xx, 시도·시간 상한의 마지막 GET,
+실제 GET 내용 충돌, 이전 미확정 POST 뒤 pause 환불도 새 회귀에 포함했다.
+
+| 이번 직접 실행 | 결과와 한계 |
+| --- | --- |
+| Node | 작업 로컬 실행 파일의 v22.23.4 사용. 기본 셸 Node는 v26.4.0이므로 시험에는 쓰지 않았다. npm check에도 Node 22 PATH를 명시했다. |
+| RED → GREEN | 원본 제품 파일을 `originals/`에 보존했다. 최초 RED는 새 봇 시험 31건 중 13건 실패, TLS 2건 실패였다. 최종 시험을 원본으로 재실행한 `red-tree/`도 봇 36건 중 13건·TLS 2건 실패했다. GREEN은 새 봇 36/36, 선택 TLS 12/12, 기존 봇 회귀 7/7이다. |
+| 봇 실행 경계 | 실제 bot·HTTP adapter·ledger 저장/재시작 코드와 실제 파일 fsync·rename을 실행했다. macOS 로컬 실행은 `_workspace` 전용 소유 잠금 대역과 HTTP fetch 대역을 사용했다. 늦은 COMMIT의 가시성은 모의했으며 실제 PostgreSQL·Linux flock 재현은 아니다. 제품 회귀 파일은 잠금 대역을 포함하지 않아 Linux에서는 실제 ledger 잠금을 사용한다. |
+| TLS 실행 경계 | 설치된 pg 8.23.1의 실제 IP upgradeToSSL → tls.connect 실행. 유효한 Node CA 원문 보존, rejectUnauthorized 강제, servername 미지정, 초기·교체 거절을 확인했다. TCP 연결·TLS 핸드셰이크·운영 인증서 접속은 실행하지 않았다. 기존 checkServerIdentity·URL TLS·env guard 시험도 선택 실행했다. |
+| 검사 | npm run check, check-style.sh, git diff --check 성공. 스타일 스크립트는 Go 전용이며 JS 포맷터 검증이 아니다. JavaScript는 Google 원문의 4.3·4.4·5.1·5.6·6.2 조항을 직접 확인했다. |
+| 실행 제약 | Docker API 소켓 권한 거부. 처음 실행한 request-store 파일 29건 중 27건 통과, 소켓 필요 시험 2건은 listen EPERM으로 실패했다. 이후에는 위의 소켓 불필요 선택 시험만 실행했다. 호스트 npm test 전체는 실행하지 않았다. |
+
+동일 원인 감사는 제품 `packages/`에 한정했다. 예전의 terminal 단독 실패
+계산과 retryAfterMs 직접 시각 덧셈 패턴은 0건이다. 비영 nextAttemptAt 생성은
+정규화한 한 곳이며, 초기·교체의 makePool은 같은 TLS guard를 통과한다.
+상세 검색 범위·출력은 `guards.json`에 남겼다.
+
+실제 Linux Bash·Node 22·PG17 전체 시험 두 번, 새 pack 소비자, clean runtime은
+부모의 후속 검증으로 남는다. 커밋·push·CI·PR 전체 검수나 배포 성공을 이번
+보완의 완료 근거로 주장하지 않는다. PR 문서 LOW 수정도 부모가 담당한다.
+
+## C5 TLS 부류·인증 설명 후속 보완 — 2026-11-04
+
+TQ C5 R1의 meta `finished`, exit 0과 원문의 C/H 0건을 확인했다.
+기준은 부모가 stage한 C5 tree `42017e4e`이며 index는 그대로 보존했다.
+증거·원본 사본은 `_workspace/recheck-20261104/phase3/sol-pr1-followup/`에 있다.
+
+M의 원인은 `servername`만 막고 동일한 검증·연결 대상 변경 부류를 남긴 것이다.
+설치된 Node 22.23.4의 `getSessionServerIdentity`는 `servername` → `host` →
+`socket._host` → `localhost`를 선택하고, 실제 인증서 이름 검사에도 이 값을
+사용한다. pg 8.23.1은 SSL 옵션을 기존 host·socket 위에 병합한다.
+따라서 공통 guard는 `servername`·`host`·`socket` 지정을 거절한다.
+초기·교체·defaults에 own/inherited와 `undefined` 모두 적용한다.
+기존 CA 보존·검증 강제·checkServerIdentity·URL/env guard는 유지했다.
+
+프로브는 실제 pg upgradeToSSL → tls.connect에 전달된 최종 host를 반환한다.
+이름 비교 대상은 포획한 옵션에 위 Node 선택 순서를 적용해 함께 반환한다.
+초기·교체·defaults의 정상 대조는 모두 기대 IP, 유효 CA, 검증 활성화를
+assert한다. socket 입력은 실제 소켓 없이 풀 생성 전에 거절되는지 검사한다.
+드라이버 기본값과 환경 설정은 `finally`에서 복구한다.
+
+| 이번 후속 직접 실행 | 결과·경계 |
+| --- | --- |
+| RED | 보존 C5 제품 사본 + 새 시험·관측 프로브에서 5건 중 4건 실패. host·socket의 누락된 거절과 host 변경을 확인했다. 정상 IP는 DNS SAN 설명에 이름 오류, host 변형은 초기·교체·defaults에서 이름 검사 통과였다. |
+| GREEN | 소켓 불필요 TLS 선택 시험 15/15, 실패·skip 0. 세 키 × own/inherited × 값/undefined × 명시적 초기·교체 및 defaults 초기·교체의 48개 거절 경계를 포함한다. |
+| 검사 | 작업 로컬 Node 22로 npm run check, check-style.sh, diff --check 실행. 스타일 스크립트는 Go 전용이다. |
+| 실행 범위 | 실제 제품 guard·pg·tls.connect와 이름 검사 함수 사용. 풀·전송은 대역이며 TCP·TLS 핸드셰이크·PostgreSQL 접속은 이번에 실행하지 않았다. Docker 접근과 호스트 전체 flock suite도 반복하지 않았다. |
+
+L은 봇 README와 배포 안내의 401·closed 설명을 정정했다. 첫 POST의 확실한
+거절도 이전 미확정 POST가 없어야 전체 실패를 확정한다. 그 외에는 pending을
+보존해 재조회하고 상한에서 unknown으로 남긴다. 인증 변경 전 수락된 POST의
+늦은 COMMIT이 가능하며 unknown은 미저장 단정이 아니다. 봇 로직은 수정하지 않았다.
+
+부모의 원 C5 증거는 Linux Bash·Node 22·PG17 두 suite 각 205/205,
+새 pack 두 개·별도 앱의 실제 PG 1행과 bot commit 1건, 청정 이미지 인증이다.
+`pr1-real-pg-counterexample/baseline-real-pg-v3.log`의 stored=true/failed와
+`fixed-real-pg.log`의 stored=true/committed, GET401 대조군 pending도 원 C5
+증거다. 이번 후속 소스의 새 전체 Linux·consumer·runtime 결과로 소급하지 않는다.
+새 전체 실행과 같은 M/L 범위의 듀얼·보안/TQ 확인은 부모의 후속 작업이다.
