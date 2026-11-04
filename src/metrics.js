@@ -31,11 +31,48 @@ function createMetrics({ app, environment }) {
     registers: [register],
   });
 
+  const dbOperations = new client.Counter({
+    name: "db_operations_total",
+    help: "Database operation outcomes",
+    labelNames: ["operation", "outcome"],
+    registers: [register],
+  });
+  const dbDuration = new client.Histogram({
+    name: "db_operation_duration_seconds",
+    help: "Database operation duration",
+    labelNames: ["operation"],
+    registers: [register],
+  });
+  const currentDatabase = new client.Gauge({
+    name: "app_database_info",
+    help: "Currently observed database (0 when disconnected)",
+    labelNames: ["database"],
+    registers: [register],
+  });
+  let previousDatabase;
+  function setDatabase(name) {
+    if (previousDatabase !== undefined) {
+      currentDatabase.remove({database: previousDatabase});
+    }
+    if (name !== null) {
+      previousDatabase = name;
+      currentDatabase.set({database: name}, 1);
+    } else {
+      previousDatabase = undefined;
+    }
+  }
+  function observeDatabase(event) {
+    dbOperations.inc({operation: event.operation, outcome: event.outcome});
+    dbDuration.observe({operation: event.operation}, event.seconds);
+  }
+
   function middleware(req, res, next) {
     const startedAt = process.hrtime.bigint();
 
     res.on("finish", () => {
-      const route = req.route ? req.route.path : UNMATCHED;
+      const route = req.route ? (req.baseUrl || '') +
+          (req.baseUrl && req.route.path === '/' ? '' : req.route.path) :
+          UNMATCHED;
 
       // /metrics 자체는 세지 않는다. 30초마다 긁히니 에러율·지연 계산을 전부 덮어쓴다.
       if (route === "/metrics") return;
@@ -50,7 +87,7 @@ function createMetrics({ app, environment }) {
     next();
   }
 
-  return { register, middleware };
+  return { register, middleware, observeDatabase, setDatabase };
 }
 
 module.exports = { createMetrics, UNMATCHED };

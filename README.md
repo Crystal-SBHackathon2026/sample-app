@@ -1,89 +1,145 @@
-# sample-app
+# Team Ghost sample-app
 
-배포 시스템 데모용 샘플 웹앱입니다. 화면과 `/api/info`에 **어느 환경(로컬·AWS·GCP)이 응답했는지** 표시합니다.
+SoftBank Hackathon 2026의 서비스 이전 검증 앱입니다. 현재 응답 환경과
+연결 DB를 보여주며, 동일 요청을 재시도해도 한 행만 저장합니다.
 
-| 경로 | 설명 |
-| --- | --- |
-| `/` | 응답한 환경·버전·기동 시각 표시 |
-| `/healthz` | 헬스체크 (Kubernetes probe, 배포 후 동작 확인) |
-| `/api/info` | 환경 정보 JSON |
-| `/metrics` | 프로메테우스 지표 (요청 수·지연·프로세스 상태) |
+## 시작하기
 
-## PR 하나가 배포까지 가는 길
+Node.js 22 이상과 PostgreSQL이 필요합니다.
+먼저 관리자 연결로 명세의 테이블을 생성하고, 앱은 별도 최소 권한 계정으로 실행합니다.
 
-이 레포에 PR을 올리면 사람 손 없이 배포까지 갑니다. 약 5분 20초 걸립니다.
-
-```
-PR 올림
-  → AI가 deploy.yaml 을 검토 (위험한 설정이면 막거나 고친다)
-  → 통과하면 커밋 상태 review-service/verify = success
-  → CI 통과 + 그 상태가 필수 체크라서 자동 병합
-  → 이미지 빌드 · Trivy 검사 · GHCR 푸시
-  → GitOps 레포의 이미지 태그 자동 갱신
-  → Argo CD가 30초 안에 감지
-  → 카나리 50% → 응답 확인 60초 → 100%
-```
-
-**검토를 통과하지 않은 커밋은 `main` 에 병합되지 않습니다.** 검토가 `needs_human` 으로 멈추거나 거절되면 상태가 `failure` 가 되고, 사람이 검토 없이 병합하려 해도 상태가 없어서 막힙니다.
-
-## 실행
 ```bash
-npm install
+npm ci
+DATABASE_URL='postgres://admin:password@localhost:5432/demo' npm run db:init
+DATABASE_URL='postgres://app:password@localhost:5432/demo' npm start
+```
+
+위 계정은 설명용입니다. 실제 시크릿은 환경변수나 Kubernetes Secret으로 공급하세요.
+앱 계정은 테이블의 SELECT/INSERT만 필요하며 스키마 생성 권한은 필요하지 않습니다.
+
+```bash
+curl http://localhost:8080/api/info
+curl -X POST http://localhost:8080/api/requests \
+  -H 'Content-Type: application/json' \
+  -d '{"request_id":"21d10fd2-5b3c-4ab3-9c7f-c47ee6234e59","run_id":"demo","phase":"onprem_live","request_no":"1","payload":"demo","created_at":"2026-11-04T00:00:00.000Z"}'
+curl http://localhost:8080/api/requests/21d10fd2-5b3c-4ab3-9c7f-c47ee6234e59
+```
+
+| 경로 | 동작 |
+| --- | --- |
+| `/` | 환경·버전·기동 시각·DB·행 수·쓰기 상태 |
+| `/api/info` | 같은 정보를 JSON으로 반환(DB 건수는 최대1초 캐시) |
+| `POST /api/requests` | 새 저장201, 동일 요청200, 같은 ID 다른 내용409 |
+| `GET /api/requests/:id` | 저장 조회200, 없음404 |
+| `/healthz` | DB와 독립된 생존 검사 |
+| `/readyz` | DB 접속과 테이블 조회 검사 |
+| `/metrics` | HTTP/DB 요청·지연·현재 연결 DB |
+
+[API 계약](docs/api.md)에 입력·응답·오류 형식을 기록했습니다.
+
+## 다른 앱에서 재사용하기
+
+두 모듈은 npm workspaces로 관리합니다. 공개 npm에 게시하지 않았습니다.
+각 폴더에서 `npm pack`으로 tarball을 만들어 다른 프로젝트에 설치할 수 있습니다.
+
+- [request-store](packages/request-store/README.md): 프레임워크 독립 PostgreSQL 코어와
+  선택적인 Express router. 다른 프레임워크는 코어의 `put/get`을 호출합니다.
+- [traffic-bot](packages/traffic-bot/README.md): 독립 HTTP 봇·영속 ledger·CLI.
+  다른 API에는 경로 설정 또는 `write/read` adapter를 주입합니다.
+
+```js
+const express = require('express');
+const {createPostgresRequestStore} = require('@team-ghost/request-store');
+const {createRequestRouter} = require('@team-ghost/request-store/express');
+const store = createPostgresRequestStore({
+  connectionString: process.env.DATABASE_URL,
+});
+const app = express();
+app.use('/api/requests', createRequestRouter({
+  store,
+  getContext: () => ({environment: 'my-app'}),
+}));
+```
+
+모든 언어에 동일 SDK를 제공하는 구조는 아닙니다. Node 앱에는 모듈을 설치하고,
+다른 언어의 앱에는 HTTP 계약을 구현한 뒤 봇을 별도 프로세스/컨테이너로 연결합니다.
+
+## 트래픽 봇 실행
+
+```bash
+BOT_BASE_URL=http://localhost:8080 \
+BOT_LEDGER_DIR=./data/ledger BOT_RUN_ID=demo-001 \
+BOT_PHASE=onprem_live BOT_RATE=1 npm run bot
+```
+
+기본 초당1건, 동시1개입니다. 매 요청의 본문을 전송 전에 디스크에 저장하고,
+응답 유실 시 같은 ID를 조회·재시도합니다. 재시작하면 pending부터 처리합니다.
+1초마다 성공·실패·환경별 비율·지연을 출력하고,9091의 `/metrics`를 제공합니다.
+
+ledger를 영속 볼륨에 두세요. 한 ledger는 봇 하나만 사용합니다.
+기본 상한은100000건/64MiB, 요청당20회/5분입니다.
+1건/s에서 건수 상한은 약27.8시간이므로 장시간 시험은 기록을 보관하고
+새 ledger/run으로 나눠 실행하세요. pending 상한에서는 생성만 대기합니다. 전체 기록/크기 상한 도달은 실패로 알리며,
+기록을 자동 삭제하지 않습니다. 시험마다 별도 ledger/run_id를 사용하세요.
+미확인 커밋은 `unknown`으로 남기므로 실패 건수만으로 데이터 손실을 판정하지 않습니다.
+
+## 환경과 전환 제어
+
+| 환경변수 | 용도 |
+| --- | --- |
+| `DATABASE_URL` / `DATABASE_URL_FILE` | DB 접속 시크릿. 파일은 시작 시 읽음 |
+| `DB_SSL=true`, `PGSSLROOTCERT` / `DB_SSL_CA` | 인증서 검증 TLS와 CA PEM 파일/본문 |
+| `DB_CONNECT_TIMEOUT_MS` / `DB_STATEMENT_TIMEOUT_MS` | 연결/쿼리 제한, 기본3000/5000ms |
+| `DB_POOL_MAX` | 프로세스당 연결 수, 기본5 |
+| `DEPLOY_ENV` / `DEPLOY_REGION` | 응답하는 환경·리전 표시 |
+| `WRITES_PAUSED=true` | 실행 내내 강제 쓰기 정지(파일보다 우선) |
+| `APP_CONTROL_FILE` | 런타임 쓰기 제어 JSON 파일 경로 |
+| `FAIL_RATE` / `HEALTH_FAIL` | 명시적 장애 주입, 본선 기본0/false |
+
+`APP_CONTROL_FILE`이 있으면 관련 요청마다 아래 파일을 읽습니다.
+오류·누락·잘못된 형식이면 쓰기를 정지하고 readiness를503으로 만듭니다.
+읽기 API와 liveness는 계속 제공합니다.
+
+```json
+{"writes_paused":true}
+```
+
+파일은 임시 파일에 쓴 후 rename으로 원자 교체하세요. false로 바꾸면 재개합니다.
+단, WRITES_PAUSED=true이면 파일 값으로 해제할 수 없고 env 변경 후 재시작해야 합니다.
+DB 풀의 런타임 교체는 모듈의 `pauseWrites`→`replaceConnection`→`resumeWrites`로
+호스트 애플리케이션에서 호출할 수 있습니다. 공개 관리 API는 제공하지 않습니다.
+샘플 서버의 DB URL 파일은 시작 시만 읽으므로 URL 변경은 재시작으로 적용합니다.
+
+이 제어는 프로세스 단위입니다. Kubernetes ConfigMap 전파는 즉시/동시가 아니므로
+쓰기 차단의 확정 증거가 아닙니다. `writes_in_flight=0`도 각 replica에서 확인해야 합니다.
+DB 권한·기존 세션 차단과 CDC 최종 반영 확인은
+별도의 이전 오케스트레이터가 수행해야 합니다. 새 DB 쓰기 이후 자동 주소 원복도
+이 앱이 수행하지 않습니다.
+
+## 검증
+
+```bash
+npm run check
 npm test
-npm start   # http://localhost:8080
+TEST_DATABASE_URL='postgres://test:test@localhost:5432/ghost_test' \
+  npm run test:integration
 ```
 
-## 환경변수
-| 이름 | 설명 |
-| --- | --- |
-| `DEPLOY_ENV` | local / aws / gcp |
-| `DEPLOY_REGION` | busan-local / ap-northeast-2 / asia-northeast1 |
-| `APP_VERSION` | 표시할 버전. **직접 넣지 않아도 된다** — CI가 빌드할 때 커밋 SHA를 이미지에 구워 넣는다 (`Dockerfile` 의 `ARG GIT_SHA`) |
-| `FAIL_RATE` | 데모용 장애 주입 비율 (0~1). 카나리 자동 롤백 시연에 사용 |
-| `HEALTH_FAIL` | 데모용 배포 실패 주입 (`true`면 헬스체크 503). 헬스체크 자동 롤백 시연에 사용 |
+통합 테스트는 지정 DB에 테이블을 생성하고 시험 전용 run_id 행을 정리합니다.
+반드시 버릴 수 있는 테스트 DB를 사용하세요. 실제 DB 없이 실행하면 PG 시험은
+skip되며, `test:integration`은 DB URL이 없으면 실패합니다.
 
-## CI (GitHub Actions)
-테스트 → 이미지 빌드 → Trivy 취약점 검사 → (main) GHCR 푸시 → GitOps 레포 이미지 태그 갱신
+## 배포
 
-## 배포 방식 (카나리)
-새 버전은 한 번에 전부 바뀌지 않습니다.
+[배포 안내](docs/deployment.md)를 따릅니다. 이미지 하나에서 앱 또는 봇을 실행하며,
+AWS/onprem 오버레이와 봇 PVC를 `k8s/`에 제공합니다.
+CI는 테스트 통과 후 이미지를 빌드·검사하고 main에서 본선 조직 GHCR에 게시합니다.
+GITOPS_TOKEN이 있으면 게시 이후 본선 GitOps 저장소의 이미지 태그를 갱신합니다.
+이전 예선 AI 검토 서비스와 자동 병합에는 의존하지 않습니다.
+관련 gitops 변경을 먼저 검토·병합하고 DB Secret을 준비해야 합니다.
 
-```
-새 이미지 → 50% (복제본이 2개면 새 버전 1개 + 옛 버전 1개)
-         → 60초 동안 /api/info 응답 확인 (10초마다 6번)
-         → 멀쩡하면 100%, 계속 틀리면 중단하고 되돌림
-```
+## 명세와 개발 프로필
 
-검토를 통과하지 않은 커밋은 `main` 에 병합되지 않습니다. 검토 결과가 커밋 상태 `review-service/verify` 로 기록되고, 그것이 브랜치 보호의 필수 체크입니다.
-
-화면의 **기동 시각**으로 파드가 실제로 교체됐는지 확인할 수 있습니다. 단계와 확인 기준은 GitOps 레포의 `apps/sample-app/base/` 에 있습니다.
-
-## 지표 (`/metrics`)
-
-Grafana 의 `apps/` 폴더에서 봅니다. 30초마다 긁습니다.
-
-| 이름 | 무엇 |
-| --- | --- |
-| `http_requests_total` | 요청 수. 라벨 `method` · `route` · `status` |
-| `http_request_duration_seconds` | 요청 처리 시간 (히스토그램) |
-| `process_*` · `nodejs_*` | 힙, 이벤트 루프 지연, CPU 등 기본 지표 |
-
-세 가지를 일부러 그렇게 했습니다.
-
-- **라벨에 커밋 SHA 를 넣지 않습니다.** 넣으면 배포마다 시계열이 새로 생겨 Prometheus 메모리를 먹습니다. "지금 뜬 게 어느 커밋인지"는 `kube_pod_container_info` 의 이미지 태그로 봅니다
-- **경로는 매칭된 라우트 이름만** 씁니다. 들어온 URL 을 그대로 쓰면 없는 경로를 긁는 요청 하나하나가 새 시계열이 됩니다. 매칭 안 되면 `route="unmatched"` 하나로 모입니다
-- **`/metrics` 자체는 세지 않습니다.** 30초마다 긁히니 세면 에러율·지연 계산을 전부 덮어씁니다
-
-앱 포트와 **같은 포트**로 냅니다. `deploy.yaml` 의 `runtime.port` 는 하나뿐이고 overlay 는 렌더러가 다시 만들기 때문에, 포트를 더 뚫으려면 명세 형식부터 바꿔야 합니다. 공개 주소로도 열리지만 나가는 값은 숫자뿐입니다.
-
-`FAIL_RATE` 로 장애를 주입하면 `status="500"` 으로 세어지므로, 에러율로 카나리를 중단시키는 것(GitOps `#24`)을 이 지표로 시험할 수 있습니다.
-
-## 배포 명세 (`deploy.yaml`)
-검토 서비스([review-service](https://github.com/Crystal-SBHackathon2026/review-service))가 PR 마다 읽어 검토하는 배포 요청 명세입니다.
-형식은 [deploy-spec.md](https://github.com/Crystal-SBHackathon2026/review-service/blob/main/ai/docs/deploy-spec.md) 를 따르고, 지금 값은 GitOps `overlays/aws` 와 같습니다.
-
-<!-- review-service #48 회귀 확인 (2026-10-09) -->
-<!-- gitops #46 환경별 분석 적용 뒤 카나리 확인 (2026-10-10) -->
-<!-- gitops #47 로컬 재조회 주기 단축 확인 (2026-10-10) -->
-<!-- 시간 단축 최종 측정 (2026-10-10) -->
-<!-- 카나리 30초 적용 뒤 측정 (2026-10-10) -->
+- [Notion 근거](docs/spec-sources.md)
+- [프로젝트 하네스 프로필](.claude/harness/project-profile.md)
+- [하네스 정본](https://github.com/xodbs1021/kty-claude-harness-template)

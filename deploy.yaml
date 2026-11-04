@@ -1,37 +1,42 @@
-# AI 검토 rv_20261011_4cebf032 가 고친 명세입니다. 무엇을 왜 고쳤는지는 검토 결과(rounds)에 있습니다.
+# Compatibility input for the existing DeploySpec renderer.
+# The directly usable Kubernetes manifests are under k8s/.
 api_version: crystal.review/v1alpha1
 kind: DeploySpec
 metadata:
   name: sample-app
-  repository: Crystal-SBHackathon2026/sample-app
+  repository: SoftBankHackathon2026/sample-app
 target:
   env: aws
   region: ap-northeast-2
-  namespace: sample-app
+  namespace: hackathon
 image:
-  repository: ghcr.io/crystal-sbhackathon2026/sample-app
+  repository: ghcr.io/softbankhackathon2026/sample-app
   platforms:
-  - amd64
+    - amd64
 runtime:
   port: 8080
-  replicas: 3
+  replicas: 2
   health:
     liveness: /healthz
-    readiness: /healthz
+    readiness: /readyz
   resources:
     cpu_request: 50m
-    memory_request: 64Mi
-    cpu_limit: 250m
-    memory_limit: 128Mi
+    memory_request: 128Mi
+    cpu_limit: 500m
+    memory_limit: 256Mi
   env:
     DEPLOY_ENV: aws
     DEPLOY_REGION: ap-northeast-2
-    FAIL_RATE: '0.3'
+    FAIL_RATE: '0'
+    DB_SSL: 'true'
 network:
   ingress:
-    public: true
-    tls: false
+    public: false
+    tls: true
 secrets:
-- name: APP_NOTICE
-  source: k8s-secret
-  key: app-notice
+  - name: DATABASE_URL
+    source: k8s-secret
+    key: database-url
+  - name: DB_SSL_CA
+    source: k8s-secret
+    key: rds-ca-pem

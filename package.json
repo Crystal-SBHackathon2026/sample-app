@@ -1,15 +1,23 @@
 {
   "name": "sample-app",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "배포 시스템 데모용 샘플 웹앱 (어느 환경이 응답했는지 표시)",
   "main": "src/server.js",
+  "workspaces": ["packages/*"],
+  "engines": { "node": ">=22" },
   "scripts": {
     "start": "node src/server.js",
-    "test": "node --test \"test/**/*.test.js\""
+    "bot": "node packages/traffic-bot/bin/traffic-bot.js",
+    "db:init": "node packages/request-store/bin/init-db.js",
+    "check": "node scripts/check.js",
+    "test": "node --test \"test/**/*.test.js\"",
+    "test:integration": "node scripts/test-integration.js"
   },
   "dependencies": {
     "@prometheus-io/client": "^0.16.1",
+    "@team-ghost/request-store": "0.1.0",
+    "@team-ghost/traffic-bot": "0.1.0",
     "express": "^4.21.2"
   }
 }

@@ -1,65 +1,160 @@
-const express = require("express");
-const { createMetrics } = require("./metrics");
+const express = require('express');
+const {createRequestRouter} = require('@team-ghost/request-store/express');
+const {createMetrics} = require('./metrics');
+const {createStoreFromEnv} = require('./db');
+const {createWriteControl} = require('./write-control');
 
-// 배포 환경 정보: 어느 서버(클라우드)가 응답했는지 화면에서 바로 보이게 한다.
 const info = {
-  app: "sample-app",
-  version: process.env.APP_VERSION || "dev",
-  environment: process.env.DEPLOY_ENV || "local",
-  region: process.env.DEPLOY_REGION || "local",
-  // 컨테이너가 뜬 시각. 재배포·롤백이 실제로 일어났는지 화면에서 바로 확인한다.
+  app: 'sample-app',
+  version: process.env.APP_VERSION || 'dev',
+  environment: process.env.DEPLOY_ENV || 'local',
+  region: process.env.DEPLOY_REGION || 'local',
   startedAt: new Date().toISOString(),
 };
 
-// 데모용 장애 주입: 0~1 사이 비율로 /api 요청을 500으로 실패시킨다.
-// 카나리 배포에서 에러율 기반 자동 롤백을 보여줄 때 사용한다.
-const failRate = Number(process.env.FAIL_RATE || 0);
+function escapeHtml(value) {
+  return String(value).replace(/[&<>"']/g, (character) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  })[character]);
+}
 
-// 데모용 배포 실패 주입: true면 헬스체크가 실패해 새 버전이 준비되지 않는다.
-// 헬스체크 실패 시 자동 롤백을 보여줄 때 사용한다.
-const healthFail = process.env.HEALTH_FAIL === "true";
-
-// 화면에는 커밋 앞 7자리만 보여준다. /api/info 는 전체 값을 돌려준다.
-const shortVersion = info.version.length === 40 ? info.version.slice(0, 7) : info.version;
-
-function createApp() {
+/** Create a sample host; the request package can be mounted in other apps. */
+function createApp(options = {}) {
+  const env = options.env || process.env;
+  const appInfo = {...info, ...options.info};
   const app = express();
-
-  // 지표 수집은 모든 라우트보다 먼저 붙인다. 404 도 세야 "없는 경로를 긁고 있다"가 보인다.
-  const metrics = createMetrics({ app: info.app, environment: info.environment });
+  app.disable('x-powered-by');
+  const metrics = createMetrics({
+    app: appInfo.app, environment: appInfo.environment,
+  });
+  const store = options.store === undefined ?
+      createStoreFromEnv(env, metrics.observeDatabase) : options.store;
+  const control = createWriteControl({
+    store,
+    file: env.APP_CONTROL_FILE,
+    initiallyPaused: env.WRITES_PAUSED === 'true',
+  });
+  app.locals.store = store;
+  app.locals.draining = false;
+  app.locals.close = async () => {
+    if (store) await store.close();
+  };
   app.use(metrics.middleware);
 
-  // 앱 포트와 같은 포트로 낸다. deploy.yaml 의 runtime.port 는 하나뿐이고,
-  // overlay 는 렌더러가 다시 만들기 때문에 포트를 더 뚫으려면 명세부터 바꿔야 한다.
-  app.get("/metrics", async (req, res) => {
-    res.set("Content-Type", metrics.register.contentType);
-    res.send(await metrics.register.metrics());
+  app.get('/metrics', async (req, res, next) => {
+    try {
+      res.set('Content-Type', metrics.register.contentType);
+      res.send(await metrics.register.metrics());
+    } catch (error) { next(error); }
   });
 
-  app.get("/healthz", (req, res) => {
-    if (healthFail) return res.status(503).json({ status: "fail" });
-    res.json({ status: "ok" });
-  });
-
-  app.get("/api/info", (req, res) => {
-    if (failRate > 0 && Math.random() < failRate) {
-      return res.status(500).json({ error: "injected failure" });
+  app.get('/healthz', (req, res) => {
+    if (env.HEALTH_FAIL === 'true') {
+      return res.status(503).json({status: 'fail'});
     }
-    res.json(info);
+    res.json({status: 'ok'});
   });
 
-  app.get("/", (req, res) => {
-    res.send(`<!doctype html>
-<html lang="ko"><head><meta charset="utf-8"><title>Crystal Sample App</title></head>
-<body style="font-family:sans-serif;max-width:560px;margin:60px auto">
-  <h1>Crystal Sample App v2</h1>
-  <p>응답한 환경: <b>${info.environment}</b> (${info.region})</p>
-  <p>버전: <b>${shortVersion}</b></p>
-  <p>기동 시각: <b>${info.startedAt}</b></p>
+  let cachedStatus;
+  let statusExpiresAt = 0;
+  let statusPending;
+  async function databaseStatus() {
+    await control.refresh();
+    if (!store || !control.healthy) throw new Error('DB unavailable');
+    if (cachedStatus && Date.now() < statusExpiresAt) return cachedStatus;
+    // Coalesce diagnostic counts; public diagnostics must not exhaust the
+    // same connection pool that commits requests. Readiness never counts rows.
+    if (!statusPending) {
+      statusPending = store.status().then((database) => {
+        cachedStatus = database;
+        statusExpiresAt = Date.now() + 1000;
+        return database;
+      }).finally(() => { statusPending = null; });
+    }
+    const database = await statusPending;
+    metrics.setDatabase(database.name);
+    return database;
+  }
+
+  app.get('/readyz', async (req, res) => {
+    try {
+      await control.refresh();
+      if (!store || !control.healthy || app.locals.draining) {
+        throw new Error('Not ready');
+      }
+      if (store.checkReady) {
+        await store.checkReady();
+      } else {
+        await store.status();
+      }
+      res.json({status: 'ok'});
+    } catch {
+      metrics.setDatabase(null);
+      res.status(503).json({status: 'unavailable'});
+    }
+  });
+
+  app.get('/api/info', async (req, res) => {
+    const failRate = Number(env.FAIL_RATE || 0);
+    if (failRate > 0 && Math.random() < failRate) {
+      return res.status(500).json({error: 'injected failure'});
+    }
+    try {
+      const database = store ? await databaseStatus() : null;
+      res.json({
+        ...appInfo, database, writes_paused: store?.writesPaused || false,
+        writes_in_flight: store?.inFlightWrites || 0,
+      });
+    } catch {
+      res.status(503).json({error: {
+        code: 'DB_UNAVAILABLE', message: 'Database unavailable',
+      }});
+    }
+  });
+
+  app.use('/api/requests', async (req, res, next) => {
+    try {
+      await control.refresh();
+      if (!store) {
+        return res.status(503).json({error: {
+          code: 'DB_UNAVAILABLE', message: 'Database not configured',
+        }});
+      }
+      next();
+    } catch (error) { next(error); }
+  }, createRequestRouter({store, getContext: () => ({
+    environment: appInfo.environment, region: appInfo.region,
+  })}));
+
+  app.get('/', async (req, res) => {
+    let databaseText = 'DB 연결 없음';
+    try {
+      const database = await databaseStatus();
+      databaseText = `${database.name} · ${database.row_count}건`;
+    } catch { /* Keep the diagnostic page available during a DB outage. */ }
+    const version = appInfo.version.length === 40 ?
+        appInfo.version.slice(0, 7) : appInfo.version;
+    res.type('html').send(`<!doctype html>
+<html lang="ko"><head><meta charset="utf-8">
+<title>Ghost Migration Demo</title></head>
+<body style="font-family:sans-serif;max-width:600px;margin:60px auto">
+  <h1>Ghost Migration Demo</h1>
+  <p>응답한 환경: <b>${escapeHtml(appInfo.environment)}</b>
+    (${escapeHtml(appInfo.region)})</p>
+  <p>버전: <b>${escapeHtml(version)}</b></p>
+  <p>기동 시각: <b>${escapeHtml(appInfo.startedAt)}</b></p>
+  <p>연결 DB: <b>${escapeHtml(databaseText)}</b></p>
+  <p>쓰기 상태: <b>${store?.writesPaused ? '일시 정지' : '허용'}</b></p>
 </body></html>`);
   });
 
+  app.use((error, req, res, next) => {
+    if (res.headersSent) return next(error);
+    res.status(500).json({error: {
+      code: 'INTERNAL_ERROR', message: 'Request failed',
+    }});
+  });
   return app;
 }
 
-module.exports = { createApp, info };
+module.exports = {createApp, info};

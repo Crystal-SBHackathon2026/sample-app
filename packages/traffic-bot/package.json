@@ -1,0 +1,11 @@
+{
+  "name": "@team-ghost/traffic-bot",
+  "version": "0.1.0",
+  "description": "Durable adapter-based HTTP migration traffic generator",
+  "main": "index.js",
+  "exports": {".": "./index.js"},
+  "bin": {"ghost-traffic-bot": "bin/traffic-bot.js"},
+  "engines": {"node": ">=22"},
+  "files": ["*.js", "bin", "README.md"],
+  "dependencies": {"proper-lockfile": "^4.1.2"}
+}

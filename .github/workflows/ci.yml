@@ -1,29 +1,27 @@
-# CI: 테스트 → 이미지 빌드 → 취약점 검사 → (main만) GHCR 푸시 → GitOps 레포 이미지 태그 갱신
-# CD는 Argo CD가 GitOps 레포 변경을 감지해 각 클러스터(로컬 k3s, EKS, GKE)에 배포한다.
-#
-# 🔴 이 파일은 배포 전 구간 시간에 직접 들어간다 (sample-app#29).
-#    PR 에서 test·build 가 돌고 wait_ci 가 그것을 기다린 뒤 병합되고,
-#    병합 후 main 에서 같은 빌드가 또 돈다. 느려지는 변경은 데모 시간을 늘린다.
 name: ci
-
 on:
   push:
     branches: [main]
   pull_request:
-
-env:
-  IMAGE: ghcr.io/crystal-sbhackathon2026/sample-app
-
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
-  # test 와 build 는 서로 기다리지 않는다 (#29 ②).
-  # 전에는 build 에 needs: test 가 있어서 10초를 직렬로 더 썼다. PR·main 양쪽에서 그랬다.
-  #
-  # ⚠️ 맞바꾼 것: main 에서 test 가 깨져도 푸시·태그 갱신이 진행된다.
-  #    PR 쪽은 브랜치 보호가 test·build·review-service/verify 를 모두 요구하므로
-  #    main 에 올라온 트리는 이미 테스트를 통과한 것이다(squash 라 내용이 같다).
-  #    테스트가 깨지면 main CI 가 빨간색으로 남아 바로 보인다.
   test:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: ghost_test
+          POSTGRES_PASSWORD: ghost_test
+          POSTGRES_DB: ghost_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd 'pg_isready -U ghost_test -d ghost_test'
+          --health-interval 5s --health-timeout 3s --health-retries 10
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -31,71 +29,81 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      - run: npm run check
       - run: npm test
-
+      - run: npm run test:integration
+        env:
+          TEST_DATABASE_URL: postgres://ghost_test:ghost_test@localhost:5432/ghost_test
+      - name: Render Kubernetes overlays
+        run: |
+          kubectl kustomize k8s/overlays/aws > /tmp/ghost-aws.yaml
+          kubectl kustomize k8s/overlays/onprem > /tmp/ghost-onprem.yaml
+          kubectl kustomize k8s/traffic-bot > /tmp/ghost-bot.yaml
   build:
+    needs: test
     runs-on: ubuntu-latest
+    env:
+      HAS_GITOPS_TOKEN: ${{ secrets.GITOPS_TOKEN != '' }}
     permissions:
       contents: read
       packages: write
-    # 🔴 job 레벨에 둔다. step 레벨 env 는 그 step 자신의 if: 에서 보이지 않는다.
-    env:
-      GITOPS_TOKEN: ${{ secrets.GITOPS_TOKEN }}
     steps:
       - uses: actions/checkout@v7
-
-      - name: 이미지 빌드
-        run: docker build --build-arg GIT_SHA=${{ github.sha }} -t "$IMAGE:${{ github.sha }}" .
-
-      # 🔴 PR 에서만 스캔한다 (#29). main 에서는 건너뛴다.
-      #
-      # 단계별 실측에서 Trivy 가 9초로 가장 큰 단계였고, docker build 는 5초였다.
-      # squash 머지라 main 트리는 PR 트리와 내용이 같고, 이미지 차이는
-      # --build-arg GIT_SHA 하나뿐이다. **설치되는 패키지가 동일하므로**
-      # PR 스캔으로 취약점 판단이 끝난다.
-      #
-      # 브랜치 보호가 build 를 필수 체크로 요구하므로, PR 에서 CRITICAL 이 나오면
-      # 병합 자체가 막힌다. 즉 취약한 이미지는 main 에 오지 못한다.
-      - name: 취약점 검사 (CRITICAL 발견 시 실패)
-        if: github.ref != 'refs/heads/main'
+      - name: Build immutable image
+        run: >-
+          docker build --build-arg GIT_SHA=${{ github.sha }}
+          -t ghcr.io/softbankhackathon2026/sample-app:${{ github.sha }} .
+      - name: Scan image
         uses: aquasecurity/trivy-action@v0.36.0
         with:
-          image-ref: ${{ env.IMAGE }}:${{ github.sha }}
+          image-ref: ghcr.io/softbankhackathon2026/sample-app:${{ github.sha }}
           severity: CRITICAL
           ignore-unfixed: true
-          exit-code: "1"
-
-      - name: GHCR 로그인
+          exit-code: '1'
+      - uses: docker/login-action@v4
         if: github.ref == 'refs/heads/main'
-        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-
-      # latest 태그는 더 쓰지 않는다 (#29). 레포 셋을 뒤져도 참조가 없었고,
-      # 배포는 gitops 의 newTag(= 병합 커밋 SHA)로만 한다. 푸시 한 번을 아낀다.
-      - name: 이미지 푸시
+      - name: Publish image
         if: github.ref == 'refs/heads/main'
-        run: docker push "$IMAGE:${{ github.sha }}"
-
-      # GitOps 태그 갱신을 이 job 안에서 한다 (#29 ③).
-      # 전에는 별도 job(update-gitops)이라 러너를 새로 띄우는 데만 10초 넘게 걸렸고,
-      # gitops 레포를 전체 히스토리로 clone 했다. sed 한 줄 바꾸는 일에 그랬다.
-      #
-      # 🔴 반드시 이미지 푸시 뒤에 와야 한다. 순서가 뒤집히면 Argo CD 가
-      #    GHCR 에 아직 없는 태그를 배포하려다 ImagePullBackOff 가 된다.
-      - name: GitOps 레포 이미지 태그 갱신
-        if: github.ref == 'refs/heads/main' && env.GITOPS_TOKEN != ''
+        run: docker push ghcr.io/softbankhackathon2026/sample-app:${{ github.sha }}
+      - name: Checkout finals GitOps configuration
+        if: github.ref == 'refs/heads/main' && env.HAS_GITOPS_TOKEN == 'true'
+        uses: actions/checkout@v7
+        with:
+          repository: SoftBankHackathon2026/gitops
+          ref: main
+          token: ${{ secrets.GITOPS_TOKEN }}
+          path: gitops
+      - name: Update published image tag
+        if: github.ref == 'refs/heads/main' && env.HAS_GITOPS_TOKEN == 'true'
+        working-directory: gitops
+        env:
+          SAMPLE_APP_SHA: ${{ github.sha }}
         run: |
-          git clone --depth 1 "https://x-access-token:${GITOPS_TOKEN}@github.com/Crystal-SBHackathon2026/gitops.git"
-          cd gitops
-          sed -i "s/newTag: .*/newTag: ${{ github.sha }}/" apps/sample-app/base/kustomization.yaml
-          git config user.name "crystal-ci"
-          git config user.email "crystal-ci@users.noreply.github.com"
-          git commit -am "chore: sample-app 이미지 태그 갱신 (${GITHUB_SHA::7})" || echo "변경 없음"
-          git push
-
-      - name: GitOps 토큰 없음 안내
-        if: github.ref == 'refs/heads/main' && env.GITOPS_TOKEN == ''
-        run: echo "GITOPS_TOKEN 시크릿이 없어 GitOps 갱신을 건너뜁니다."
+          python3 - <<'PYTHON'
+          import os
+          import re
+          from pathlib import Path
+          path = Path('apps/sample-app/base/kustomization.yaml')
+          text = path.read_text()
+          if 'ghcr.io/softbankhackathon2026/sample-app' not in text:
+              raise SystemExit('Merge finals GitOps configuration first')
+          updated, count = re.subn(r'(?m)^(\s*newTag:) .+$',
+                                  lambda m: m[1] + ' ' + os.environ['SAMPLE_APP_SHA'],
+                                  text)
+          if count != 1:
+              raise SystemExit('Expected one sample-app image tag')
+          path.write_text(updated)
+          PYTHON
+          if git diff --quiet; then exit 0; fi
+          git config user.name "ghost-ci"
+          git config user.email "ghost-ci@users.noreply.github.com"
+          git add apps/sample-app/base/kustomization.yaml
+          git commit -m "chore: update sample-app image ($SAMPLE_APP_SHA)"
+          git push origin HEAD:main
+      - name: GitOps token not configured
+        if: github.ref == 'refs/heads/main' && env.HAS_GITOPS_TOKEN != 'true'
+        run: echo "Image published. Configure GITOPS_TOKEN for automatic GitOps updates."

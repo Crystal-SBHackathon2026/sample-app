@@ -1,5 +1,10 @@
 node_modules
+**/node_modules
 test
 .git
 .github
 *.md
+.claude
+_workspace
+k8s
+ledger
