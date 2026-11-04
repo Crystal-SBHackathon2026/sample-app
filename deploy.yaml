@@ -3,13 +3,13 @@ api_version: crystal.review/v1alpha1
 kind: DeploySpec
 metadata:
   name: sample-app
-  repository: Crystal-SBHackathon2026/sample-app
+  repository: SoftBankHackathon2026/sample-app
 target:
   env: aws
   region: ap-northeast-2
   namespace: sample-app
 image:
-  repository: ghcr.io/crystal-sbhackathon2026/sample-app
+  repository: ghcr.io/softbankhackathon2026/sample-app
   platforms:
   - amd64
 runtime:

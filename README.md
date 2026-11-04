@@ -79,8 +79,8 @@ Grafana 의 `apps/` 폴더에서 봅니다. 30초마다 긁습니다.
 `FAIL_RATE` 로 장애를 주입하면 `status="500"` 으로 세어지므로, 에러율로 카나리를 중단시키는 것(GitOps `#24`)을 이 지표로 시험할 수 있습니다.
 
 ## 배포 명세 (`deploy.yaml`)
-검토 서비스([review-service](https://github.com/Crystal-SBHackathon2026/review-service))가 PR 마다 읽어 검토하는 배포 요청 명세입니다.
-형식은 [deploy-spec.md](https://github.com/Crystal-SBHackathon2026/review-service/blob/main/ai/docs/deploy-spec.md) 를 따르고, 지금 값은 GitOps `overlays/aws` 와 같습니다.
+검토 서비스([review-service](https://github.com/SoftBankHackathon2026/review-service))가 PR 마다 읽어 검토하는 배포 요청 명세입니다.
+형식은 [deploy-spec.md](https://github.com/SoftBankHackathon2026/review-service/blob/main/ai/docs/deploy-spec.md) 를 따르고, 지금 값은 GitOps `overlays/aws` 와 같습니다.
 
 <!-- review-service #48 회귀 확인 (2026-10-09) -->
 <!-- gitops #46 환경별 분석 적용 뒤 카나리 확인 (2026-10-10) -->
