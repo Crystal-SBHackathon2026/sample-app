@@ -59,7 +59,7 @@ jobs:
           docker run --rm \
             -v "$RUNNER_TEMP/sample-app.tar:/image.tar:ro" \
             aquasec/trivy:0.70.0 image --input /image.tar \
-            --scanners vuln --severity CRITICAL --ignore-unfixed --exit-code 1
+            --scanners vuln,secret --severity CRITICAL --ignore-unfixed --exit-code 1
       - uses: docker/login-action@v4
         if: github.ref == 'refs/heads/main'
         with:
