@@ -19,9 +19,10 @@ target:
   region: ap-northeast-2
   namespace: sample-app
 image:
-  repository: ghcr.io/softbankhackathon2026/sample-app
+  repository: docker.io/kty1021/sample-app
   platforms:
     - amd64
+    - arm64
 runtime:
   port: 8080
   replicas: 3

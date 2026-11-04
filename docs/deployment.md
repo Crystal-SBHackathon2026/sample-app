@@ -1,8 +1,9 @@
 # 본선 배포 안내
 
-이미지: `ghcr.io/softbankhackathon2026/sample-app:<commit-sha>`. 앱과 봇이 같은
-이미지를 쓴다. 이 문서는 배포 선언과 운영 순서다. 이 작업에서 실제 클러스터
-적용, 운영 DB 변경, merge는 하지 않았다.
+이미지: `docker.io/kty1021/sample-app:<commit-sha>`(Docker Hub 공개 저장소,
+amd64·arm64를 묶은 manifest). 앱과 봇이 같은 이미지를 쓴다. 이 문서는 배포
+선언과 운영 순서다. 이 작업에서 실제 클러스터 적용, 운영 DB 변경, merge는
+하지 않았다.
 
 ## 배포 정본과 예시
 
@@ -68,8 +69,9 @@ review-service 카탈로그를 바꿔야 하며 이 작업의 범위 밖이다.
   `database-url` 키, AWS `sample-app/sample-app-db-ca`의 `ca.pem` 키.
   요청 API 토큰 `sample-app-api-token`의 `token` 키는 아래 요청 API 인증 절을
   따른다.
-- 저장소에 실접속 Secret을 넣지 않는다. 프라이빗 GHCR이면
-  imagePullSecrets가 따로 필요하다.
+- 저장소에 실접속 Secret을 넣지 않는다. 이미지는 공개 저장소라
+  imagePullSecrets 없이 받는다. Docker Hub 익명 pull 제한에 걸리는지는
+  클러스터에서 확인하지 않았다.
 
 ## DB TLS 정책
 
@@ -99,10 +101,13 @@ review-service 카탈로그를 바꿔야 하며 이 작업의 범위 밖이다.
 | `k8s/traffic-bot` | 해당 없음 | `BOT_API_TOKEN` ← 같은 Secret, 필수 |
 | gitops `overlays/local` | 없음(open) | 없음 |
 
-- 생성물 `deploy.yaml`과 gitops `overlays/aws`는 바꾸지 않았다. AWS 값은
-  wrapper의 JSON6902 `add`로만 넣는다.
-- gitops `overlays/local`은 k3d localhost 개발 전용이라 open으로 둔다. 시작
-  때 warn 로그가 남는다. 공개 진입점에 연결하지 않는다.
+- 인증 값은 생성물 `deploy.yaml`과 gitops `overlays/aws`에 넣지 않았다. AWS
+  값은 wrapper의 JSON6902 `add`로만 넣는다.
+- gitops `overlays/local`은 개발용이라 open으로 둔다. 시작 때 warn 로그가
+  남는다. 매니페스트는 localhost 바인딩을 보장하지 않는다. k3d를
+  `-p "8081:80@loadbalancer"`로 만들면 모든 인터페이스에 열려 같은 LAN에서
+  익명 쓰기가 된다. `-p "127.0.0.1:8081:80@loadbalancer"`로 만들고 공개
+  진입점이나 공유망에 연결하지 않는다.
 - gcp overlay, gitops `base/rollout.yaml`, argocd는 바꾸지 않았다.
 
 앱의 Secret 참조가 `optional: true`인 이유는 진단이다. Secret이 없어도 pod는
@@ -241,13 +246,25 @@ curl -sS -o /dev/null -w '%{http_code}\n' -H @/secure/api-auth-header \
 
 ## 이미지 게시와 롤백 순서
 
-1. sample-app PR 병합 → CI가 시험·빌드·스캔 뒤 병합 커밋 SHA로 게시한다
+1. sample-app PR 병합 → CI가 시험 뒤 amd64·arm64를 빌드하고 둘 다 스캔한
+   다음 `<sha>-amd64`·`<sha>-arm64`와 두 arch를 묶은 `<sha>` manifest를
+   Docker Hub에 게시한다. `latest`는 쓰지 않는다
    ([ADR-0003](decisions/2026-11-04-ci-gate-after-db-tests.md)).
 1. 같은 CI가 gitops base `newTag`를 갱신한다. gitops PR이 아직 병합되지
-   않았으면 본선 이미지 경로가 없어 의도대로 실패한다.
-1. 게시된 SHA가 GHCR에 있는지 읽기 전용으로 확인한다. gitops PR의 `newTag`를
-   그 SHA로 맞춘 뒤 사용자 승인 후 병합한다. 옛 태그는 새 조직 경로에 없을 수
-   있다(ImagePullBackOff, 미확인).
+   않아 base 이미지가 Docker Hub 경로가 아니면 태그를 바꾸지 않고 의도대로
+   실패한다.
+1. 게시된 SHA가 Docker Hub에 있는지 읽기 전용으로 확인한다. gitops PR의
+   `newTag`는 그 SHA여야 하고, 사용자 승인 후 병합한다. GHCR에만 게시된 옛
+   태그는 Docker Hub에 없다(ImagePullBackOff).
+1. gitops PR의 초기 `newTag`는 앱 커밋
+   `dda34482ed5106e90e7bcce358015e8cda0f7002`다. 이 태그는 2026-11-04 Docker
+   Hub 공개 저장소에 게시됐다. amd64·arm64를 묶은 index digest는
+   `sha256:4e219077ff61e90dab00762e81e1ab97bc4344b06a9dc9af2f9ec19aade0f41b`다.
+   로그인 없이 index와 두 arch의 manifest·config를 받을 수 있음을 확인했다.
+   CI가 아니라 그 커밋 트리에서 손으로 빌드·스캔(Trivy CRITICAL 0, secret
+   0)해 게시한 부트스트랩 이미지다. 다음 태그부터는 병합 뒤 main CI가
+   게시한다. 이 이미지는 `dda3448` 코드이며, 아직 커밋하지 않은 Docker Hub
+   전환 변경을 검증한 결과가 아니다.
 1. 쓰기 정지 중에는 이미지 rollout을 하지 않는다. 카나리 분석이 5xx를 실패로
    볼 수 있다.
 1. 롤백은 이미지 태그, wrapper, Argo Application path를 함께 되돌린다.

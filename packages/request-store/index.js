@@ -33,10 +33,13 @@ function driverDefaultSsl() {
 /**
  * Accepts only false, true or an object that keeps certificate and host
  * verification on; pg turns strings such as 'no-verify' into unverified TLS.
+ * Returns false or TLS options with rejectUnauthorized pinned to true, so
+ * NODE_TLS_REJECT_UNAUTHORIZED=0 cannot fill in an unverified default.
  */
-function assertVerifiedTls(ssl) {
+function verifiedTls(ssl) {
   const effective = ssl === undefined ? driverDefaultSsl() : ssl;
-  if (typeof effective === 'boolean') return;
+  if (effective === false) return false;
+  if (effective === true) return {rejectUnauthorized: true};
   const verifies = effective !== null && typeof effective === 'object' &&
       !Array.isArray(effective) &&
       (!('rejectUnauthorized' in effective) ||
@@ -46,6 +49,7 @@ function assertVerifiedTls(ssl) {
     throw invalidConfiguration(
         'TLS certificate verification must remain enabled');
   }
+  return {...effective, rejectUnauthorized: true};
 }
 
 function assertUrlWithoutSsl(connectionString) {
@@ -98,11 +102,11 @@ function createPostgresRequestStore(options = {}) {
     const {statementTimeoutMillis = 5000, poolFactory: ignored,
       onObservation: callback, writesPaused: initial, ...rest} = config;
     if (rest.connectionString) assertUrlWithoutSsl(rest.connectionString);
-    assertVerifiedTls(rest.ssl);
+    const ssl = verifiedTls(rest.ssl);
     const created = poolFactory({
       max: 5, connectionTimeoutMillis: 3000, idleTimeoutMillis: 30000,
       keepAlive: true,
-      ...rest, statement_timeout: statementTimeoutMillis,
+      ...rest, ssl, statement_timeout: statementTimeoutMillis,
       query_timeout: statementTimeoutMillis + 1000,
     });
     // Idle connection errors must not terminate the whole Node process.

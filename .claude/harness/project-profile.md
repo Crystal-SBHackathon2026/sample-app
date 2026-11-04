@@ -48,7 +48,7 @@
 
 - 서버: npm start, 8080. 봇: npm run bot, metrics 별도 포트.
 - Dockerfile은 packages/와 SQL을 포함해야 한다.
-- 대상 조직: SoftBankHackathon2026; GHCR은 소문자 조직 경로.
+- 대상 조직: SoftBankHackathon2026. 이미지: docker.io/kty1021/sample-app(공개).
 - gitops 관련 sample-app 매니페스트도 본선용으로 조정한다.
 - gitops 작업 브랜치: codex/sample-app-finals-db. 실제 클러스터 적용은 별도.
 - 외부 서비스 배포·DB 변경은 이 작업의 완료 주장에 포함하지 않는다.
@@ -57,6 +57,8 @@
 
 - 기본 브랜치 main. 작업 브랜치 codex/modular-db-traffic.
 - Conventional Commits, 기능 브랜치와 PR, squash merge는 사용자 승인 후.
+- 검수(사용자 2026-11-04): 커밋마다 CC/CX 듀얼 1회, PR 전체 CC/CX 듀얼 3회.
+- Phase 3의 추가 전체 3회 루프는 쓰지 않는다. 구정책 계수는 PR 3회에 넣지 않는다.
 - 글로벌 설정은 건드리지 않고 템플릿의 프로젝트 글루만 설치한다.
 
 ## 8. 도메인 예시 (examples)

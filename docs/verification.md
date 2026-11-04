@@ -120,10 +120,34 @@ H7 새 실행(run `docker-restart-91077f48`)은 같은 볼륨에 두 번째 봇
 증거는 이전 라운드 `green-bot-docker-restart.log`(07:13Z, 이미지
 `sha256:21487655…`)를 재사용한 것이다. 새 이미지에서 다시 실행한 결과가 아니다.
 
-새 head의 CI는 아직 없다. 이 작업 트리를 커밋·push한 뒤 그 head에서 확인한다.
-run 41763180023(head `41fcdb8`)은 이 결과의 CI 증거가 아니다. 새 head CI,
+이 절을 쓸 때는 새 head의 CI가 없었다. 그 뒤 커밋 `dda3448`의 CI는 다음
+절에 있다. run 41763180023(head `41fcdb8`)은 이 결과의 CI 증거가 아니다.
 main 게시 시간, 실제 운영 TLS·HTTPS, Secret 작성, Argo 동기화, merge는
 측정하거나 실시하지 않았다.
+
+## Docker Hub 부트스트랩 이미지와 커밋 `dda3448` CI
+
+커밋 `dda34482ed5106e90e7bcce358015e8cda0f7002`(트리 `78670798`)의 결과다.
+아직 커밋하지 않은 Docker Hub 전환 변경(CI·매니페스트·문서)은 여기에 들어
+있지 않다. 그 변경의 새 head CI는 아직 없다. 증거는
+`_workspace/recheck-20261104/`에 있다.
+
+| 검증 | 결과 | 출처 |
+| --- | --- | --- |
+| 게시 | `docker.io/kty1021/sample-app:dda3448…`, index `sha256:4e219077…`, linux/amd64 `c6fdf7f5…`, linux/arm64 `88b5cb22…` | 손으로 게시, `dockerhub-publication.json` |
+| 공개·익명 pull | 공개 저장소. 로그인 없이 index, 두 arch의 manifest·config 수신, config `APP_VERSION`이 커밋 SHA | 위 기록, 09:37Z 익명 index 재조회에서 digest·arch 같음 |
+| 게시 전 스캔 | 두 arch Trivy vuln·secret, CRITICAL 0, secret 0 | `dockerhub-publish/commit-*-scan.json` |
+| 인증 스모크 | 게시한 두 이미지(amd64 `48ba4d72…`, arm64 `0c49a09b…`)에서 익명 주입 401·행 불변, 인증 봇 1건 커밋, 진단 200 | `phase3/hub-dda-{amd64,arm64}-auth.json` |
+| PR CI run 41803670013 | head `dda3448`, `pull_request`, test·build job 성공 | `ci-dda3448.json` |
+
+run 41803670013은 그 커밋의 `ci.yml`(GHCR 이름, amd64 한 개)로 돌았다. PR
+실행이라 로그인·게시·GitOps 단계는 건너뛰었다. 그래서 Docker Hub 태그는 CI가
+아니라 손으로 게시한 부트스트랩 이미지다. 재검수 이전 head `41fcdb8`의 run
+41763180023과는 다른 실행이다.
+
+게시한 이미지는 위 S1 절의 Docker 이미지(`sha256:46df9ad3…`)나 그 전에
+만든 `review-…` 시험 빌드와 다르다. 위 인증 스모크는 커밋 트리에서 새로
+빌드해 게시한 이미지로 다시 실행한 결과다.
 
 ## 확인 한계
 

@@ -193,22 +193,24 @@ test('S3 real PostgreSQL rejects anonymous forward_001 and commits with token',
         logger: recordingLogger().logger,
         env: {REQUEST_API_AUTH: 'required', REQUEST_API_TOKEN: token},
       });
-      const rows = async () => (await admin.query(
+      // Counts only this test's IDs, so parallel files may write forward_001.
+      const rows = async (requestId) => (await admin.query(
           `SELECT count(*)::text AS n FROM public.migration_demo
-          WHERE run_id = 'forward_001'`)).rows[0].n;
-      const body = (requestId) => JSON.stringify({
-        request_id: requestId, run_id: 'forward_001', phase: 'aws_live',
+          WHERE request_id = $1`, [requestId])).rows[0].n;
+      const body = (requestId, runId) => JSON.stringify({
+        request_id: requestId, run_id: runId, phase: 'aws_live',
         request_no: '1', payload: 'auth probe',
         created_at: '2026-11-04T00:00:00.000Z',
       });
-      const before = await rows();
-      const anonymous = await postRequest(base, {}, body(anonymousId));
+      const anonymous = await postRequest(base, {},
+          body(anonymousId, 'forward_001'));
       assert.equal(anonymous.status, 401);
-      assert.equal(await rows(), before);
+      assert.equal(await rows(anonymousId), '0');
       const authorized = await postRequest(base,
-          {authorization: `Bearer ${token}`}, body(authorizedId));
+          {authorization: `Bearer ${token}`},
+          body(authorizedId, `auth-s3-${randomUUID()}`));
       assert.equal(authorized.status, 201);
-      assert.equal(Number(await rows()), Number(before) + 1);
+      assert.equal(await rows(authorizedId), '1');
     });
 
 test('S4 anonymous GET by id is 401 without a store read', async (t) => {

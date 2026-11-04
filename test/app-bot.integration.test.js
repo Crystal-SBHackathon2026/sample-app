@@ -47,10 +47,10 @@ async function hostApi(t, env) {
   });
   return host;
 }
-async function countRows(host, runId = host.runId) {
+async function countRows(host) {
   return (await host.admin.query(
       'SELECT count(*)::text AS n FROM migration_demo WHERE run_id=$1',
-      [runId])).rows[0].n;
+      [host.runId])).rows[0].n;
 }
 function syntheticRecord(runId) {
   return {request_id: randomUUID(), run_id: runId, phase: 'onprem_live',
@@ -156,11 +156,14 @@ test('S3 real PG: enforced API refuses an anonymous forward_001 POST',
       const host = await hostApi(t, ENFORCED_ENV);
       const forged = syntheticRecord(TEAM_RUN_ID);
       host.ownRequestIds.push(forged.request_id);
-      const before = await countRows(host, TEAM_RUN_ID);
       const anonymous = await postRecord(host.base, forged);
       await anonymous.body?.cancel();
       assert.equal(anonymous.status, 401);
-      assert.equal(await countRows(host, TEAM_RUN_ID), before);
+      // Counts the forged ID only; other files may commit forward_001 rows.
+      const {rows} = await host.admin.query(
+          'SELECT count(*)::text AS n FROM migration_demo WHERE request_id=$1',
+          [forged.request_id]);
+      assert.equal(rows[0].n, '0');
       const authorized = await postRecord(host.base,
           syntheticRecord(host.runId), {authorization: `Bearer ${API_TOKEN}`});
       assert.equal(authorized.status, 201);

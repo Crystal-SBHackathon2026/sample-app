@@ -180,8 +180,9 @@ CI는 ubuntu 러너에서 실행합니다.
   마세요. 봇 선언(`k8s/traffic-bot/`)과 업그레이드용 legacy 잠금 복구 Job은
   여기에 있습니다.
 
-CI는 실제 PostgreSQL 시험을 통과한 커밋만 빌드하고, PR과 main 모두 이미지를
-검사한 뒤 main에서 본선 조직 GHCR에 게시합니다
+CI는 실제 PostgreSQL 시험을 통과한 커밋만 amd64·arm64로 빌드하고, PR과 main
+모두 두 이미지를 검사한 뒤 main에서 Docker Hub 공개 저장소
+`docker.io/kty1021/sample-app`에 커밋 SHA 태그로 게시합니다
 ([ADR-0003](docs/decisions/2026-11-04-ci-gate-after-db-tests.md)).
 `GITOPS_TOKEN`이 있으면 게시 뒤 GitOps 저장소의 이미지 태그를 갱신합니다.
 관련 gitops 변경을 먼저 검토·병합하고 DB Secret을 준비해야 합니다.

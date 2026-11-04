@@ -35,9 +35,11 @@ related: "https://github.com/Crystal-SBHackathon2026/sample-app/issues/29"
 
 1. `test`: PostgreSQL 17 서비스, `npm run check`, `npm test`,
    `npm run test:integration`, Kubernetes 렌더.
-1. `build`(`needs: test`): 이미지 빌드, PR과 main 모두 Trivy
-   (`vuln,secret`, CRITICAL, `--ignore-unfixed`).
-1. main에서만 GHCR 게시, 같은 job 안에서 GitOps `newTag` 갱신.
+1. `build`(`needs: test`): amd64·arm64 이미지 빌드, PR과 main 모두 두
+   이미지에 Trivy(`vuln,secret`, CRITICAL, `--ignore-unfixed`).
+1. main에서만 Docker Hub 공개 저장소 `docker.io/kty1021/sample-app`에 게시,
+   같은 job 안에서 GitOps `newTag` 갱신. 레지스트리는 2026-11-04 사용자
+   승인으로 GHCR에서 바꿨다. PR에는 Docker Hub 토큰을 주지 않는다.
 
 #29의 ③(태그 갱신을 같은 job에서), latest 태그 미사용, 카나리 60초 유지는
 그대로 따른다.
@@ -67,28 +69,31 @@ related: "https://github.com/Crystal-SBHackathon2026/sample-app/issues/29"
 | --- | --- | --- |
 | 예선 기준선 주석 | Trivy 9초, build 5초, 직렬 대기 10초 | 예선 기록, 재측정 아님 |
 | head `41fcdb8` PR run 41763180023 | test job 49초, build job 20초 | 2026-11-04 조회, 재사용 |
+| head `dda3448` PR run 41803670013 | test job 49초, build job 31초 | 2026-11-04 조회, 재사용 |
 
 run 41763180023은 이 ADR의 보완(재검수 r1)과 요청 API 인증 변경보다 앞선 head
-`41fcdb8`의 결과를 재사용한 값이다. 이 게이트 정의 자체는 그 head와 같지만,
-시험 수가 늘어난 새 head의 시간은 아니다. 새 head의 PR run에서 다시 재며,
-아직 재지 않았다.
+`41fcdb8`의 결과를 재사용한 값이다. run 41803670013은 그 변경을 커밋한 head
+`dda3448`의 값이다. 두 run 모두 그 커밋의 amd64 한 개 GHCR 게이트로 돌았다.
 
 run 41763180023(head `41fcdb8`)의 단계 시간은 컨테이너 기동 10초, `npm test`
 13초, `npm run test:integration` 12초, 렌더 5초, 이미지 빌드 7초, Trivy
-9초였다.
+9초였다. 이 값은 amd64 한 개 기준이다. arm64를 QEMU로 함께 빌드·스캔하는
+지금 게이트의 시간은 아직 재지 않았다.
 
 `npm test`(DB 없음, PG 시험 생략)와 `npm run test:integration`(DB 필수,
 스키마 초기화 뒤 전체 시험)은 DB와 무관한 시험을 두 번 돌린다. 로컬 README의
 두 명령과 같은 단순한 계약을 지키는 비용으로 공개하고 받아들인다. 중복을
 줄이는 최적화는 후속으로 미루며, 담당자는 김태윤이다.
-main 전용 게시·태그 갱신 단계는 run 41763180023에서 건너뛰었으므로 아직
+main 전용 게시·태그 갱신 단계는 두 PR run 모두 건너뛰었으므로 아직
 측정값이 없다. 병합 뒤 main run에서 담당자 김태윤이 잰다. 팀 합의 전에는 SLO나 시간
 목표를 정하지 않는다.
 
 선택 비용: PR과 병합 사이에 CRITICAL CVE가 새로 공개되면 main 게시가
 실패하고 GitOps 태그 갱신도 멈춰 본선 배포가 막힌다. 대응은 취약한 의존성이나
 베이스 이미지를 고친 뒤 다시 검사하는 것이다. 스캔을 끄거나 검사하지 않은
-이미지를 손으로 게시하는 우회 배포는 하지 않는다.
+이미지를 손으로 게시하는 우회 배포는 하지 않는다. 첫 태그 `dda3448`은 Docker
+Hub 게시 CI가 아직 main에 없어 손으로 게시했다. 게시 전에 두 arch 이미지를
+Trivy로 검사했다([검증 기록](../verification.md)).
 
 ## 관련
 

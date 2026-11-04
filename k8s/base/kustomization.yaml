@@ -11,5 +11,5 @@ configMapGenerator:
 generatorOptions:
   disableNameSuffixHash: true
 images:
-  - name: ghcr.io/softbankhackathon2026/sample-app
+  - name: docker.io/kty1021/sample-app
     newTag: replace-with-commit-sha

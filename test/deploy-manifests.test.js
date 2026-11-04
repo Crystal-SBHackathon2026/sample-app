@@ -137,6 +137,56 @@ test('k8s/ 어디에도 TLS 인증서 검증 해제 설정이 없다', () => {
   }
 });
 
+/** 사용자 승인(2026-11-04)으로 정한 sample-app 의 공개 이미지 저장소. */
+const DOCKER_HUB_IMAGE = 'docker.io/kty1021/sample-app';
+/** image·kustomize images·DeploySpec 에서 레지스트리 경로를 읽는다. */
+const IMAGE_REF_PATTERN =
+    /^\s*(?:image|- name|repository): (\S*\.\S*\/sample-app)$/gm;
+
+test('sample-app 매니페스트와 deploy.yaml 의 이미지는 Docker Hub 저장소다',
+    () => {
+      for (const file of [
+        'k8s/base/deployment.yaml', 'k8s/base/kustomization.yaml',
+        'k8s/traffic-bot/bot.yaml', 'k8s/traffic-bot/kustomization.yaml',
+        'deploy.yaml',
+      ]) {
+        const text = readFileSync(join(REPO_ROOT, file), 'utf8');
+        const refs = [...text.matchAll(IMAGE_REF_PATTERN)].map((m) => m[1]);
+        assert.deepStrictEqual(refs, [DOCKER_HUB_IMAGE], file);
+      }
+      // GitHub 저장소 경로는 레지스트리와 별개라 바꾸지 않는다.
+      assert.match(readFileSync(join(REPO_ROOT, 'deploy.yaml'), 'utf8'),
+          /^ {2}repository: SoftBankHackathon2026\/sample-app$/m);
+    });
+
+test('CI 는 Docker Hub 에만 게시하고 latest 태그를 쓰지 않는다', () => {
+  const ci = readFileSync(
+      join(REPO_ROOT, '.github', 'workflows', 'ci.yml'), 'utf8');
+  assert.ok(ci.includes(DOCKER_HUB_IMAGE));
+  assert.doesNotMatch(ci, /ghcr\.io/);
+  assert.doesNotMatch(ci, /:latest\b/);
+});
+
+/**
+ * DeploySpec 의 `image.platforms` 목록을 읽는다.
+ * @param {string} spec
+ * @return {!Array<string>}
+ */
+function readImagePlatforms(spec) {
+  const match = spec.match(/^ {2}platforms:\n((?: {4}- \S+\n)+)/m);
+  assert.ok(match, 'image.platforms 가 deploy.yaml 에 없다');
+  return match[1].trim().split('\n').map((line) => line.trim().slice(2));
+}
+
+test('deploy.yaml 의 image.platforms 는 CI 가 빌드하는 arch 와 같다', () => {
+  const ci = readFileSync(
+      join(REPO_ROOT, '.github', 'workflows', 'ci.yml'), 'utf8');
+  const build = ci.match(/for arch in ([\w ]+); do\n\s+docker buildx build/);
+  assert.ok(build, 'CI 의 arch 별 buildx 반복문이 없다');
+  const spec = readFileSync(join(REPO_ROOT, 'deploy.yaml'), 'utf8');
+  assert.deepStrictEqual(readImagePlatforms(spec), build[1].split(' '));
+});
+
 test('.env.example 은 공개 노출용 required 를 켜고 토큰 값은 주석으로만 둔다',
     () => {
       const lines = readFileSync(ENV_EXAMPLE, 'utf8').split('\n');

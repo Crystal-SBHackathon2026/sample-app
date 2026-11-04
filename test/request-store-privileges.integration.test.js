@@ -15,7 +15,8 @@ test('actual app role needs SELECT/INSERT only and cannot own schema changes',
       let store;
       t.after(async () => {
         if (store) await store.close();
-        await admin.query('DELETE FROM migration_demo WHERE request_id=$1', [id]);
+        await admin.query('DELETE FROM migration_demo WHERE request_id=$1',
+            [id]);
         await admin.query(`DROP OWNED BY "${role}"`);
         await admin.query(`DROP ROLE "${role}"`);
         await admin.end();
@@ -42,6 +43,7 @@ test('actual app role needs SELECT/INSERT only and cannot own schema changes',
         await assert.rejects(client.query('DELETE FROM migration_demo'),
             {code: '42501'});
         await assert.rejects(client.query(
-            'CREATE TABLE public.must_not_create (id integer)'), {code: '42501'});
+            'CREATE TABLE public.must_not_create (id integer)'),
+            {code: '42501'});
       } finally { await client.end(); }
     });

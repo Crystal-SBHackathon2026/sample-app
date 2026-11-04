@@ -1,6 +1,7 @@
-# CI: 테스트(실제 PostgreSQL) → 이미지 빌드 → 취약점 검사 → (main만) GHCR 게시
-# → GitOps 이미지 태그 갱신. 예선 issue #29 의 병렬화·main 스캔 생략을 되돌린
-# 이유와 비용은 docs/decisions/2026-11-04-ci-gate-after-db-tests.md(ADR-0003).
+# CI: 테스트(실제 PostgreSQL) → amd64·arm64 이미지 빌드 → 둘 다 취약점 검사
+# → (main만) Docker Hub 공개 저장소 게시 → GitOps 이미지 태그 갱신. 예선 issue
+# #29 의 병렬화·main 스캔 생략을 되돌린 이유와 비용은
+# docs/decisions/2026-11-04-ci-gate-after-db-tests.md(ADR-0003).
 name: ci
 on:
   push:
@@ -49,33 +50,49 @@ jobs:
     runs-on: ubuntu-latest
     env:
       HAS_GITOPS_TOKEN: ${{ secrets.GITOPS_TOKEN != '' }}
+      # 공개 저장소. 태그는 커밋 SHA 와 그 arch 별 태그뿐이다(latest 없음).
+      IMAGE: docker.io/kty1021/sample-app
+      SHA: ${{ github.sha }}
     permissions:
       contents: read
-      packages: write
     steps:
       - uses: actions/checkout@v7
-      - name: Build immutable image
-        run: >-
-          docker build --build-arg GIT_SHA=${{ github.sha }}
-          -t ghcr.io/softbankhackathon2026/sample-app:${{ github.sha }} .
-      # PR 과 main 모두 스캔한다. 게시 대상 이미지를 직접 검사해야 PR 스캔 뒤
-      # 공개된 CVE 도 잡는다. 실패하면 우회 게시하지 않고 고친 뒤 다시 돈다(ADR-0003).
-      - name: Scan image
+      - uses: docker/setup-qemu-action@v4
+      - uses: docker/setup-buildx-action@v4
+      - name: Build immutable images
         run: |
-          docker save ghcr.io/softbankhackathon2026/sample-app:${{ github.sha }} -o "$RUNNER_TEMP/sample-app.tar"
-          docker run --rm \
-            -v "$RUNNER_TEMP/sample-app.tar:/image.tar:ro" \
-            aquasec/trivy:0.70.0 image --input /image.tar \
-            --scanners vuln,secret --severity CRITICAL --ignore-unfixed --exit-code 1
+          for arch in amd64 arm64; do
+            docker buildx build --platform "linux/$arch" --load \
+              --build-arg GIT_SHA="$SHA" -t "$IMAGE:$SHA-$arch" .
+          done
+      # PR 과 main 모두 두 arch 를 스캔한다. 게시 대상 이미지를 직접 검사해야
+      # PR 스캔 뒤 공개된 CVE 도 잡는다. 하나라도 실패하면 우회 게시하지 않고
+      # 고친 뒤 다시 돈다(ADR-0003).
+      - name: Scan images
+        run: |
+          for arch in amd64 arm64; do
+            docker save "$IMAGE:$SHA-$arch" \
+              -o "$RUNNER_TEMP/sample-app-$arch.tar"
+            docker run --rm \
+              -v "$RUNNER_TEMP/sample-app-$arch.tar:/image.tar:ro" \
+              aquasec/trivy:0.70.0 image --input /image.tar \
+              --scanners vuln,secret --severity CRITICAL --ignore-unfixed \
+              --exit-code 1
+          done
+      # 토큰이 없으면 로그인이 실패해 게시 단계로 가지 않는다.
       - uses: docker/login-action@v4
         if: github.ref == 'refs/heads/main'
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Publish image
+          username: kty1021
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: Publish images
         if: github.ref == 'refs/heads/main'
-        run: docker push ghcr.io/softbankhackathon2026/sample-app:${{ github.sha }}
+        run: |
+          for arch in amd64 arm64; do
+            docker push "$IMAGE:$SHA-$arch"
+          done
+          docker buildx imagetools create -t "$IMAGE:$SHA" \
+            "$IMAGE:$SHA-amd64" "$IMAGE:$SHA-arm64"
       - name: Checkout finals GitOps configuration
         if: github.ref == 'refs/heads/main' && env.HAS_GITOPS_TOKEN == 'true'
         uses: actions/checkout@v7
@@ -96,8 +113,9 @@ jobs:
           from pathlib import Path
           path = Path('apps/sample-app/base/kustomization.yaml')
           text = path.read_text()
-          if 'ghcr.io/softbankhackathon2026/sample-app' not in text:
-              raise SystemExit('Merge finals GitOps configuration first')
+          # Docker Hub 로 바뀐 base 가 main 에 없으면 태그만 바꾸지 않고 멈춘다.
+          if os.environ['IMAGE'] not in text:
+              raise SystemExit('Merge Docker Hub GitOps configuration first')
           updated, count = re.subn(r'(?m)^(\s*newTag:) .+$',
                                   lambda m: m[1] + ' ' + os.environ['SAMPLE_APP_SHA'],
                                   text)

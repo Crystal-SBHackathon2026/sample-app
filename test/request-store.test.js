@@ -318,12 +318,16 @@ test('omitted ssl rejects driver defaults that disable verification', () => {
 
 test('accepted TLS inputs always reach pg.Client with verification on', () => {
   const {Client} = require('pg');
+  const verified = {rejectUnauthorized: true};
   const cases = [
-    [{mode: undefined, ssl: false}, true, true],
+    [{mode: undefined, ssl: false}, true, verified],
     [{mode: undefined, ssl: false}, false, false],
     [{mode: undefined, ssl: false}, undefined, false],
-    [{mode: 'require', ssl: false}, undefined, true],
-    [{mode: undefined, ssl: false}, {ca: 'PEM'}, {ca: 'PEM'}],
+    [{mode: 'require', ssl: false}, undefined, verified],
+    [{mode: undefined, ssl: true}, undefined, verified],
+    [{mode: undefined, ssl: false}, {}, verified],
+    [{mode: undefined, ssl: false}, {ca: 'PEM'},
+      {rejectUnauthorized: true, ca: 'PEM'}],
     [{mode: undefined, ssl: false}, {rejectUnauthorized: true, ca: 'PEM'},
       {rejectUnauthorized: true, ca: 'PEM'}],
   ];
@@ -345,6 +349,33 @@ test('accepted TLS inputs always reach pg.Client with verification on', () => {
     });
   }
 });
+
+test('real pg TLS upgrade stays verified when Node TLS checks are off',
+    () => {
+      const {spawnSync} = require('node:child_process');
+      const probe = require.resolve('./fixtures/pg-tls-upgrade-probe');
+      const verified = {initial: true, replacement: true};
+      const plain = {initial: null, replacement: null};
+      const cases = [
+        [undefined, 'true', verified], [undefined, '{}', verified],
+        [undefined, '{"ca":"PEM"}', verified],
+        [undefined, '{"rejectUnauthorized":true}', verified],
+        ['require', undefined, verified], ['verify-full', undefined, verified],
+        [undefined, 'false', plain], [undefined, undefined, plain],
+        ['require', 'false', plain], ['disable', undefined, plain],
+      ];
+      for (const [mode, sslJson, expected] of cases) {
+        // A child process keeps the global TLS override out of other tests.
+        const env = {NODE_TLS_REJECT_UNAUTHORIZED: '0'};
+        if (mode !== undefined) env.PGSSLMODE = mode;
+        const args = sslJson === undefined ? [probe] : [probe, sslJson];
+        const run = spawnSync(process.execPath, args,
+            {env, encoding: 'utf8', timeout: 10000});
+        const label = `PGSSLMODE=${mode} ssl=${sslJson}`;
+        assert.equal(run.status, 0, `${label}: ${run.stderr}`);
+        assert.deepEqual(JSON.parse(run.stdout), expected, label);
+      }
+    });
 
 test('invalid connection strings fail without echoing the secret', () => {
   const {inspect} = require('node:util');
