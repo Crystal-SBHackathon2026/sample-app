@@ -12,6 +12,9 @@ const {test} = require('node:test');
 const assert = require('node:assert');
 const {readFileSync, readdirSync} = require('node:fs');
 const {join} = require('node:path');
+const {
+  BASH_MISSING, publishPlan, readJob, resolveEnv, runStep,
+} = require('./fixtures/ci-workflow-trace');
 
 const REPO_ROOT = join(__dirname, '..');
 const K8S_DIR = join(REPO_ROOT, 'k8s');
@@ -159,12 +162,28 @@ test('sample-app 매니페스트와 deploy.yaml 의 이미지는 Docker Hub 저�
           /^ {2}repository: SoftBankHackathon2026\/sample-app$/m);
     });
 
-test('CI 는 Docker Hub 에만 게시하고 latest 태그를 쓰지 않는다', () => {
-  const ci = readFileSync(
-      join(REPO_ROOT, '.github', 'workflows', 'ci.yml'), 'utf8');
-  assert.ok(ci.includes(DOCKER_HUB_IMAGE));
+const ci = readFileSync(
+    join(REPO_ROOT, '.github', 'workflows', 'ci.yml'), 'utf8');
+
+test('CI 는 GHCR 과 latest 태그를 쓰지 않는다', () => {
   assert.doesNotMatch(ci, /ghcr\.io/);
   assert.doesNotMatch(ci, /:latest\b/);
+});
+
+test('CI 의 외부 action 은 full commit SHA, Trivy 는 digest 로 고정한다', () => {
+  const actions = [...ci.matchAll(/^\s*(?:- )?uses: (.+)$/gm)]
+      .map((match) => match[1]);
+  assert.ok(actions.length > 0);
+  for (const action of actions) {
+    // 태그는 옮겨질 수 있다. 사람이 읽을 버전은 주석으로 남긴다.
+    assert.match(action, /^[\w.-]+\/[\w.-]+@[0-9a-f]{40} # v\d+\.\d+\.\d+$/,
+        action);
+  }
+  const trivy = [...ci.matchAll(/aquasec\/trivy\S*/g)].map((m) => m[0]);
+  assert.ok(trivy.length > 0);
+  for (const image of trivy) {
+    assert.match(image, /^aquasec\/trivy:\d+\.\d+\.\d+@sha256:[0-9a-f]{64}$/);
+  }
 });
 
 /**
@@ -178,13 +197,94 @@ function readImagePlatforms(spec) {
   return match[1].trim().split('\n').map((line) => line.trim().slice(2));
 }
 
-test('deploy.yaml 의 image.platforms 는 CI 가 빌드하는 arch 와 같다', () => {
-  const ci = readFileSync(
-      join(REPO_ROOT, '.github', 'workflows', 'ci.yml'), 'utf8');
-  const build = ci.match(/for arch in ([\w ]+); do\n\s+docker buildx build/);
-  assert.ok(build, 'CI 의 arch 별 buildx 반복문이 없다');
-  const spec = readFileSync(join(REPO_ROOT, 'deploy.yaml'), 'utf8');
-  assert.deepStrictEqual(readImagePlatforms(spec), build[1].split(' '));
+const platforms = readImagePlatforms(
+    readFileSync(join(REPO_ROOT, 'deploy.yaml'), 'utf8'));
+/** CI 가 github.sha 로 받는 커밋 SHA 자리에 넣는 가짜 값. */
+const FAKE_SHA = 'a'.repeat(40);
+/** 이미지를 만들고 검사하고 게시하는 build job 의 단계 이름. */
+const IMAGE_STEPS =
+    ['Build immutable images', 'Scan images', 'Publish images'];
+const buildJob = readJob(ci, 'build');
+const buildEnv = resolveEnv(buildJob.env, {'github.sha': FAKE_SHA});
+
+/**
+ * @param {string} name
+ * @return {!Object<string, string>} build job 의 그 이름 단계.
+ */
+function buildStep(name) {
+  const step = buildJob.steps.find((candidate) => candidate.name === name);
+  assert.ok(step, `${name} 단계가 build job 에 없다`);
+  return step;
+}
+
+/**
+ * 이미지 단계의 셸을 stub docker 로 차례로 돌려 게시 계획을 모은다.
+ * 실제 Docker 는 실행하지 않는다.
+ * @param {!Object<string, string>=} override job env 위에 덮을 값.
+ * @return {!Object} publishPlan 결과.
+ */
+function traceImageSteps(override = {}) {
+  const calls = [];
+  for (const name of IMAGE_STEPS) {
+    const run = runStep(buildStep(name).run, {...buildEnv, ...override});
+    assert.strictEqual(run.status, 0, `${name}: ${run.stderr}`);
+    calls.push(...run.calls);
+  }
+  return publishPlan(calls);
+}
+
+/**
+ * arch 마다 `<SHA>-<arch>` 이미지를 빌드·스캔·push 하고 `<SHA>` index 로
+ * 묶는 Docker Hub 게시 계획.
+ * @param {!Array<string>} arches
+ * @return {!Object}
+ */
+function dockerHubPlan(arches) {
+  const tags =
+      arches.map((arch) => `${DOCKER_HUB_IMAGE}:${FAKE_SHA}-${arch}`);
+  return {
+    builds: arches.map((arch, index) => [`linux/${arch}`, tags[index]]),
+    scanned: tags,
+    pushed: tags,
+    indexes: [[`${DOCKER_HUB_IMAGE}:${FAKE_SHA}`, ...tags]],
+  };
+}
+
+test('CI 는 deploy.yaml platforms 의 arch 마다 빌드·스캔한 이미지를 ' +
+    'Docker Hub 에 push 하고 index 로 묶는다', {skip: BASH_MISSING}, () => {
+  assert.deepStrictEqual(traceImageSteps(), dockerHubPlan(platforms));
+});
+
+test('CI 이미지 단계는 모두 job env ARCHES 하나에서 arch 목록을 얻는다',
+    {skip: BASH_MISSING}, () => {
+      const arches = ['amd64', 'arm64', 's390x'];
+      assert.deepStrictEqual(traceImageSteps({ARCHES: arches.join(' ')}),
+          dockerHubPlan(arches));
+    });
+
+test('CI 스캔 단계는 한 arch 라도 Trivy 가 실패하면 실패한다',
+    {skip: BASH_MISSING}, () => {
+      const scan = buildStep('Scan images').run;
+      for (const arch of platforms) {
+        const tar = `sample-app-${arch}.tar:/image.tar`;
+        assert.notStrictEqual(runStep(scan, buildEnv, tar).status, 0, arch);
+      }
+    });
+
+test('CI 는 test 뒤에 빌드하고 스캔 뒤 main 에서만 비밀을 쓰고 게시한다', () => {
+  const names = buildJob.steps.map((step) => step.name ?? step.uses);
+  const login = names.findIndex((name) => name.startsWith('docker/login'));
+  assert.ok(names.indexOf('Scan images') < login, '스캔 뒤에 로그인한다');
+  assert.ok(login < names.indexOf('Publish images'), '로그인 뒤에 게시한다');
+  const main = 'github.ref == \'refs/heads/main\'';
+  for (const step of buildJob.steps) {
+    if (!/secrets\./.test(step.yaml)) continue;
+    assert.ok((step.if ?? '').startsWith(main),
+        `${step.name ?? step.uses} 는 main 에서만 비밀을 쓴다`);
+  }
+  assert.strictEqual(buildStep('Publish images').if, main);
+  assert.strictEqual(buildJob.needs, 'test');
+  assert.doesNotMatch(ci, /pull_request_target/);
 });
 
 test('.env.example 은 공개 노출용 required 를 켜고 토큰 값은 주석으로만 둔다',

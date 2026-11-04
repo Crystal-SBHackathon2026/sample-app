@@ -1,6 +1,6 @@
 const {Pool, defaults: driverDefaults} = require('pg');
 const {RequestStoreError, normalizeId, normalizeRequest} = require('./request');
-const {postgresOptionsFromEnv} = require('./config');
+const {isUrlTlsKey, postgresOptionsFromEnv} = require('./config');
 
 const COLUMNS =
     'request_id, run_id, phase, request_no::text, payload, created_at';
@@ -60,8 +60,8 @@ function assertUrlWithoutSsl(connectionString) {
     // URL errors keep the raw input, which may contain credentials.
     throw invalidConfiguration('connectionString must be a PostgreSQL URL');
   }
-  if (['sslmode', 'sslcert', 'sslkey', 'sslrootcert', 'ssl'].some(
-      (name) => url.searchParams.has(name))) {
+  // pg parses the URL again and its TLS keys override the pinned ssl option.
+  if ([...url.searchParams.keys()].some(isUrlTlsKey)) {
     throw invalidConfiguration(
         'Use postgresOptionsFromEnv or explicit ssl options without URL SSL parameters');
   }

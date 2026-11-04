@@ -95,6 +95,27 @@ main 전용 게시·태그 갱신 단계는 두 PR run 모두 건너뛰었으므
 Hub 게시 CI가 아직 main에 없어 손으로 게시했다. 게시 전에 두 arch 이미지를
 Trivy로 검사했다([검증 기록](../verification.md)).
 
+### 게시 공급 경로
+
+외부 action은 공식 저장소 태그가 가리키는 full commit SHA로 고정하고 버전은
+주석으로 남겼다. 2026-11-04에 `git ls-remote`와 GitHub API로 조회했고, 다섯
+태그 모두 commit을 직접 가리켰다(annotated tag 아님). Trivy는 공식
+`aquasec/trivy:0.70.0` multi-arch index digest로 고정했다. 이 digest는
+부트스트랩 게시 전 스캔에 쓴 로컬 이미지의 RepoDigest와 같다. 버전을 올릴
+때는 SHA·digest와 주석을 함께 바꾼다.
+
+남은 위험과 이연은 다음과 같다. 담당자는 모두 김태윤이다.
+
+- Docker Hub 게시 토큰 `DOCKERHUB_TOKEN`의 실제 권한 범위는 확인하지 않았다.
+  토큰 값과 설정을 조회하지 않았기 때문이다. 필요한 최소 권한은
+  `kty1021/sample-app` 저장소 쓰기다. CI 전용 계정이나 토큰으로 바꿀 때 그
+  범위를 확인하고 여기에 적는다.
+- GitOps는 Docker Hub 태그(`newTag`, 커밋 전체 SHA)를 참조한다. Docker Hub
+  태그는 다시 push하면 다른 이미지를 가리킬 수 있다. 그래서 게시 뒤 태그가
+  같은 이미지를 가리킨다는 보장은 없고, 토큰이 새면 같은 태그로 다른
+  이미지를 올릴 수 있다. digest 참조로 바꾸면 renderer의 `newTag` 계약과
+  CI의 갱신 단계가 함께 바뀐다. 그래서 이번에는 바꾸지 않고 기록만 한다.
+
 ## 관련
 
 - [issue #29 원문](https://github.com/Crystal-SBHackathon2026/sample-app/issues/29)

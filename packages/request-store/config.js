@@ -14,6 +14,17 @@ function positiveInteger(value, fallback, max) {
   return number;
 }
 
+/**
+ * True for URL query keys that pg-connection-string turns into TLS settings
+ * (every ssl* key and uselibpqcompat), compared case-insensitively.
+ * @param {string} name
+ * @return {boolean}
+ */
+function isUrlTlsKey(name) {
+  const key = name.toLowerCase();
+  return key.startsWith('ssl') || key === 'uselibpqcompat';
+}
+
 /** Build explicit TLS settings without URL SSL parameters overriding them. */
 function postgresOptionsFromEnv(env = process.env) {
   if (!env.DATABASE_URL) {
@@ -37,8 +48,8 @@ function postgresOptionsFromEnv(env = process.env) {
   if (!['disable', 'require', 'verify-ca', 'verify-full'].includes(mode)) {
     throw configuration('TLS mode must disable TLS or verify certificates');
   }
-  if (['sslcert', 'sslkey', 'sslrootcert', 'ssl'].some(
-      (name) => url.searchParams.has(name))) {
+  if ([...url.searchParams.keys()].some(
+      (name) => name !== 'sslmode' && isUrlTlsKey(name))) {
     throw configuration('Use PGSSLROOTCERT for TLS and remove URL SSL options');
   }
   url.searchParams.delete('sslmode');
@@ -58,4 +69,4 @@ function postgresOptionsFromEnv(env = process.env) {
   };
 }
 
-module.exports = {postgresOptionsFromEnv};
+module.exports = {isUrlTlsKey, postgresOptionsFromEnv};

@@ -350,32 +350,127 @@ test('accepted TLS inputs always reach pg.Client with verification on', () => {
   }
 });
 
+/**
+ * Runs the TLS upgrade probe in a child process with Node TLS checks off, so
+ * the global override cannot leak into other tests.
+ * @param {string|undefined} arg Probe argument; see the fixture header.
+ * @param {!Object<string, string>} env Extra child environment.
+ * @return {{status: ?number, stdout: string, stderr: string}}
+ */
+function runTlsProbe(arg, env = {}) {
+  const {spawnSync} = require('node:child_process');
+  const probe = require.resolve('./fixtures/pg-tls-upgrade-probe');
+  const args = arg === undefined ? [probe] : [probe, arg];
+  return spawnSync(process.execPath, args, {
+    env: {NODE_TLS_REJECT_UNAUTHORIZED: '0', ...env},
+    encoding: 'utf8', timeout: 10000,
+  });
+}
+
+/** Both pools of the probe resolved to verified TLS with this CA. */
+function verifiedPools(ca = null) {
+  const pool = {rejectUnauthorized: true, ca};
+  return {initial: pool, replacement: pool};
+}
+
 test('real pg TLS upgrade stays verified when Node TLS checks are off',
     () => {
-      const {spawnSync} = require('node:child_process');
-      const probe = require.resolve('./fixtures/pg-tls-upgrade-probe');
-      const verified = {initial: true, replacement: true};
       const plain = {initial: null, replacement: null};
       const cases = [
-        [undefined, 'true', verified], [undefined, '{}', verified],
-        [undefined, '{"ca":"PEM"}', verified],
-        [undefined, '{"rejectUnauthorized":true}', verified],
-        ['require', undefined, verified], ['verify-full', undefined, verified],
+        [undefined, 'true', verifiedPools()],
+        [undefined, '{}', verifiedPools()],
+        [undefined, '{"ca":"PEM"}', verifiedPools('PEM')],
+        [undefined, '{"rejectUnauthorized":true}', verifiedPools()],
+        ['require', undefined, verifiedPools()],
+        ['verify-full', undefined, verifiedPools()],
         [undefined, 'false', plain], [undefined, undefined, plain],
         ['require', 'false', plain], ['disable', undefined, plain],
       ];
       for (const [mode, sslJson, expected] of cases) {
-        // A child process keeps the global TLS override out of other tests.
-        const env = {NODE_TLS_REJECT_UNAUTHORIZED: '0'};
-        if (mode !== undefined) env.PGSSLMODE = mode;
-        const args = sslJson === undefined ? [probe] : [probe, sslJson];
-        const run = spawnSync(process.execPath, args,
-            {env, encoding: 'utf8', timeout: 10000});
+        const run = runTlsProbe(sslJson,
+            mode === undefined ? {} : {PGSSLMODE: mode});
         const label = `PGSSLMODE=${mode} ssl=${sslJson}`;
         assert.equal(run.status, 0, `${label}: ${run.stderr}`);
         assert.deepEqual(JSON.parse(run.stdout), expected, label);
       }
     });
+
+// Every query key pg-connection-string 2.14 turns into ssl, in the spellings
+// it reads plus case variants it ignores today.
+const URL_TLS_QUERIES = [
+  'sslnegotiation=direct', 'sslnegotiation=postgres', 'sslmode=require',
+  'sslcert=/c', 'sslkey=/k', 'sslrootcert=/r', 'ssl=true', 'ssl=0',
+  'sslpassword=x', 'sslcrl=x', 'sslcompression=1', 'SSLMODE=no-verify',
+  'SslNegotiation=direct', 'uselibpqcompat=true', 'UseLibpqCompat=true',
+];
+
+test('URL TLS keys are rejected before any pool, at entry and on replace',
+    async () => {
+      const url = 'postgres://user:pass@db/demo';
+      for (const query of URL_TLS_QUERIES) {
+        let pools = 0;
+        const poolFactory = () => {
+          pools++;
+          return {on() {}, query: async () => ({rows: []}),
+            end: async () => {}};
+        };
+        assert.throws(() => createPostgresRequestStore({
+          connectionString: `${url}?${query}`, ssl: {ca: 'PEM'}, poolFactory,
+        }), {code: 'INVALID_CONFIGURATION'}, query);
+        assert.equal(pools, 0, query);
+        const store = createPostgresRequestStore({
+          connectionString: url, ssl: {ca: 'PEM'}, poolFactory,
+        });
+        await store.pauseWrites();
+        await assert.rejects(store.replaceConnection({
+          connectionString: `${url}?${query}`, ssl: {ca: 'PEM'},
+        }), {code: 'DB_UNAVAILABLE'}, query);
+        assert.equal(pools, 1, query);
+        await store.close();
+      }
+    });
+
+test('env helper reads only URL sslmode and rejects every other TLS key',
+    () => {
+      const url = 'postgres://user:pass@db/demo';
+      const tlsEnv = {DB_SSL: 'true', DB_SSL_CA: 'PEM'};
+      const otherKeys = URL_TLS_QUERIES.filter(
+          (query) => !query.startsWith('sslmode='));
+      const mixed = 'sslmode=verify-full&sslnegotiation=direct';
+      for (const query of [...otherKeys, mixed]) {
+        assert.throws(() => postgresOptionsFromEnv({
+          ...tlsEnv, DATABASE_URL: `${url}?${query}`,
+        }), {code: 'INVALID_CONFIGURATION'}, query);
+      }
+      const options = postgresOptionsFromEnv({...tlsEnv,
+        DATABASE_URL: `${url}?sslmode=verify-full&application_name=bot`});
+      assert.deepEqual(options.ssl, {rejectUnauthorized: true, ca: 'PEM'});
+      assert.deepEqual([...new URL(options.connectionString).searchParams],
+          [['application_name', 'bot']]);
+    });
+
+test('real pg keeps the CA and verification for URL TLS keys', () => {
+  const probeUrl = 'postgres://probe:probe@db.invalid/demo';
+  const tlsEnv = {DB_SSL: 'true', DB_SSL_CA: 'PEM'};
+  const rejected = [
+    ['initial', '{"ca":"PEM"}',
+      {PROBE_INITIAL_QUERY: 'sslnegotiation=direct'}, 'INVALID_CONFIGURATION'],
+    ['replacement', '{"ca":"PEM"}',
+      {PROBE_REPLACEMENT_QUERY: 'sslnegotiation=direct'}, 'DB_UNAVAILABLE'],
+    ['env', '--from-env', {...tlsEnv,
+      DATABASE_URL: `${probeUrl}?sslnegotiation=direct`},
+    'INVALID_CONFIGURATION'],
+  ];
+  for (const [label, arg, env, code] of rejected) {
+    const run = runTlsProbe(arg, env);
+    assert.equal(run.status, 1, `${label}: ${run.stdout}`);
+    assert.equal(run.stderr, `${code}\n`, label);
+  }
+  const fromEnv = runTlsProbe('--from-env', {...tlsEnv,
+    DATABASE_URL: `${probeUrl}?sslmode=verify-full`});
+  assert.equal(fromEnv.status, 0, fromEnv.stderr);
+  assert.deepEqual(JSON.parse(fromEnv.stdout), verifiedPools('PEM'));
+});
 
 test('invalid connection strings fail without echoing the secret', () => {
   const {inspect} = require('node:util');

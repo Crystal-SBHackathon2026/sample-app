@@ -138,10 +138,15 @@ DB 권한 차단을 수행하지 않으며 전환 오케스트레이터를 대�
 | `DB_POOL_MAX` | 5, 최대 100 |
 
 URL의 `sslmode`는 helper가 제거해 명시적인 검증 설정으로 바꾼다.
-다른 URL SSL 키는 거절한다.
+다른 URL SSL 키는 거절한다. SSL 키는 `ssl`로 시작하는 모든 키(예:
+`sslnegotiation`)와 `uselibpqcompat`이며 대소문자를 가리지 않는다. pg가 URL을
+다시 해석할 때 이 키들이 고정한 `ssl` 옵션을 덮어써 CA와 검증 설정을 잃기
+때문이다.
 `DB_SSL=true` 또는 CA가 지정됐는데 TLS 모드가 `disable`이면 설정을 거절한다.
 코어에 직접 options를 전달할 때는 URL에 SSL 키를 넣지 말고
 `ssl: {rejectUnauthorized: true, ca}`를 전달한다. 로컬 평문은 `ssl: false`다.
+코어는 처음 만들 때와 `replaceConnection` 모두 SSL 키가 있는 URL로 풀을 만들지
+않는다. 교체에서는 이 거절이 `DB_UNAVAILABLE`로 보인다.
 
 코어가 받는 `ssl`은 `true`, `false`, 미지정, 인증서를 검증하는 객체뿐이다.
 `'no-verify'` 같은 문자열, `null`, 숫자, 배열은 거절한다.

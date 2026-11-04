@@ -34,12 +34,15 @@ hostname·PID로 소유자 사망을 추정하는 안은 같은 Pod의 컨테이
   경로의 dev/ino가 같은지 확인한다.
 - 시간·mtime·PID·hostname으로 잠금을 빼앗는 경로는 없다. 해제는 정상
   `close()` 또는 프로세스 종료 시 커널의 FD 정리 둘뿐이다.
-- 오류 코드는 네 가지다. 모두 ledger를 바꾸기 전에 시작을 거절한다.
+- 오류 코드는 네 가지다. 셋은 ledger를 바꾸기 전에 시작을 거절한다.
     - `LEDGER_OWNED`: 다른 writer가 잠금을 쥐고 있다.
     - `LEDGER_LOCK_UNSUPPORTED`: flock(1)이 없거나 비정상 종료, 잠금이
       유지되지 않음, symlink 등 안전하게 획득할 수 없는 경로.
-    - `LEDGER_LOCK_LOST`: 잠금 파일이 외부에서 교체·삭제됐다.
     - `LEDGER_LEGACY_LOCK`: 옛 proper-lockfile 잠금 디렉터리가 남아 있다.
+- `LEDGER_LOCK_LOST`는 시작 거절이 아니다. 실행 중 다음 ledger 저장의
+  rename 직전에 잠금 파일이 외부에서 교체·삭제된 것을 발견하면 그 저장을
+  게시하지 않고 봇을 fatal로 멈춘다(요약 `fatal`, CLI 종료 코드 1). 그 전에
+  처리한 기록은 이미 ledger에 있을 수 있다.
 - `lockRetries` 옵션과 proper-lockfile 의존을 없앤다. 재시도는 kubelet
   재시작 backoff가 맡는다.
 - 기본 상한은 라이브러리·CLI·매니페스트 모두 10000건/8MiB로 맞춘다.

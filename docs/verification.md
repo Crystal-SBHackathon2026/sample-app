@@ -149,6 +149,28 @@ run 41803670013은 그 커밋의 `ci.yml`(GHCR 이름, amd64 한 개)로 돌았�
 만든 `review-…` 시험 빌드와 다르다. 위 인증 스모크는 커밋 트리에서 새로
 빌드해 게시한 이미지로 다시 실행한 결과다.
 
+## PR 단계 비차단 지적 처분
+
+커밋 `efb34f1` 위에서 PR 전체 리뷰의 비차단 지적 6건을 처분한 결과다. 증거는
+`_workspace/recheck-20261104/phase3/pr-dispositions/`에 있다. 이 변경의 새
+CI는 아직 없다. 커밋·push 뒤에 실제 CI가 돌아야 확인된다.
+
+| 검증 | 결과 |
+| --- | --- |
+| URL TLS 키 RED | 수정 전 실제 pg upgrade에서 `sslnegotiation=direct`와 CA를 주면 Node TLS 검증 해제 상태에서 `rejectUnauthorized:false`, CA 없음 |
+| URL TLS 키 GREEN | `ssl` 접두 키·`uselibpqcompat`을 처음 생성·교체·env에서 거절, env `sslmode`는 읽고 제거, CA·검증 유지 |
+| CI trace | stub docker로 step 셸을 돌린 trace. 실제 Docker는 실행하지 않음 |
+| CI 변이 4종 | arm64 스캔·push·index 누락, 다른 저장소 push. 수정 전 시험은 모두 통과, 새 시험은 모두 실패 |
+| action pin | 공식 태그를 `git ls-remote`·GitHub API로 조회한 commit SHA, Trivy는 로컬 스캔 이미지와 같은 index digest |
+| Linux Node 22.23.4·PG17 | `npm test`, `npm run test:integration` 각 167건 중 통과 164, 실패 0, 건너뜀 3 |
+| 호스트 bash 3.2 | Linux에서 건너뛴 CI trace 3건 포함 매니페스트·request-store 시험 42건 통과 |
+| actionlint | `ci.yml` exit 0 |
+
+Linux 시험 이미지(`node:22-alpine`)에는 bash가 없어 CI trace 3건을 이유와
+함께 건너뛴다. GitHub ubuntu runner에는 bash가 있어 CI의 `npm test`에서는
+돈다. 호스트 `npm test`의 봇 CLI 실패 4건은 macOS에 flock이 없어서이며
+Linux 실행에서는 통과했다.
+
 ## 확인 한계
 
 봇은 유한 기록을 보관하며 전체 한도에서 종료한다. 기본값은 10000건/8MiB로

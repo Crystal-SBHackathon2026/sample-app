@@ -108,7 +108,10 @@ review-service 카탈로그를 바꿔야 하며 이 작업의 범위 밖이다.
   `-p "8081:80@loadbalancer"`로 만들면 모든 인터페이스에 열려 같은 LAN에서
   익명 쓰기가 된다. `-p "127.0.0.1:8081:80@loadbalancer"`로 만들고 공개
   진입점이나 공유망에 연결하지 않는다.
-- gcp overlay, gitops `base/rollout.yaml`, argocd는 바꾸지 않았다.
+- 인증 env는 gcp overlay, gitops `base/rollout.yaml`, argocd에 넣지 않았다.
+  gcp overlay는 이 PR 전체에서 바뀌지 않았다. 다만 PR 전체로는
+  `base/rollout.yaml`의 이미지 경로·control volume·readiness timeout과
+  `argocd/sample-app-aws.yaml`의 소스 경로(`runtime/aws`)가 바뀌었다.
 
 앱의 Secret 참조가 `optional: true`인 이유는 진단이다. Secret이 없어도 pod는
 뜨고 `/api/requests`만 503 `API_AUTH_UNCONFIGURED`로 닫힌다. 화면과 health는
@@ -265,6 +268,11 @@ curl -sS -o /dev/null -w '%{http_code}\n' -H @/secure/api-auth-header \
    0)해 게시한 부트스트랩 이미지다. 다음 태그부터는 병합 뒤 main CI가
    게시한다. 이 이미지는 `dda3448` 코드이며, 아직 커밋하지 않은 Docker Hub
    전환 변경을 검증한 결과가 아니다.
+1. CI의 외부 action은 commit SHA로, Trivy 이미지는 digest로 고정했다.
+   GitOps는 아직 Docker Hub 태그를 참조하며, 태그는 다시 push하면 바뀔 수
+   있다. 게시 토큰 범위 미확인과 digest 전환 이연은
+   [ADR-0003](decisions/2026-11-04-ci-gate-after-db-tests.md#게시-공급-경로)에
+   있다.
 1. 쓰기 정지 중에는 이미지 rollout을 하지 않는다. 카나리 분석이 5xx를 실패로
    볼 수 있다.
 1. 롤백은 이미지 태그, wrapper, Argo Application path를 함께 되돌린다.
@@ -371,7 +379,9 @@ ledger의 단일 writer는 `.owner.lock` 파일의 커널 flock으로 보장한�
 | 노드 장애 | 옛 노드 종료·fencing 확인 뒤에만 볼륨 이동(외부 책임) |
 
 잠금 시작 실패 코드는 `LEDGER_OWNED`, `LEDGER_LOCK_UNSUPPORTED`,
-`LEDGER_LOCK_LOST`, `LEDGER_LEGACY_LOCK` 네 가지다. 토큰 설정 거절은
+`LEDGER_LEGACY_LOCK` 세 가지다. `LEDGER_LOCK_LOST`는 시작 거절이 아니다.
+실행 중 다음 ledger 저장 직전에 잠금 파일의 교체·삭제를 발견하면 그 저장을
+버리고 fatal로 멈춘다(요약 `fatal`, 종료 코드 1). 토큰 설정 거절은
 `BOT_API_TOKEN_INVALID`와 `INSECURE_TOKEN_TRANSPORT`이며 URL과 토큰 값은
 출력하지 않는다. 잠금 지원 범위는 Linux 단일
 노드의 로컬 FS 또는 RWO 블록 볼륨이다. NFS·EFS·RWX와 cross-node 강제
