@@ -17,7 +17,7 @@
   "dependencies": {
     "@prometheus-io/client": "^0.16.1",
     "@team-ghost/request-store": "0.1.0",
-    "@team-ghost/traffic-bot": "0.1.0",
+    "@team-ghost/traffic-bot": "0.2.0",
     "express": "^4.21.2"
   }
 }

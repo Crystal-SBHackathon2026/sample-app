@@ -1,14 +1,24 @@
 const {randomUUID} = require('node:crypto');
 const {setTimeout: delay} = require('node:timers/promises');
-const {openLedger, positiveInteger} = require('./ledger');
+const {
+  openLedger, positiveInteger, DEFAULT_MAX_RECORDS, DEFAULT_MAX_LEDGER_BYTES,
+} = require('./ledger');
 const {createHttpAdapter, HttpError} = require('./http-adapter');
 
 const FIELDS = ['request_id', 'run_id', 'phase', 'request_no', 'payload',
   'created_at'];
+const RUN_ID_PATTERN = /^[A-Za-z0-9_.-]{1,200}$/;
+// The only lock failure that can surface after start; operators must see it.
+const LOCK_LOST = 'LEDGER_LOCK_LOST';
 
-function terminalError(code) {
+function codedError(code) {
   const error = new Error(code);
   error.code = code;
+  return error;
+}
+
+function terminalError(code) {
+  const error = codedError(code);
   error.terminal = true;
   return error;
 }
@@ -31,14 +41,23 @@ function validateRequest(request) {
   return Object.fromEntries(FIELDS.map((key) => [key, request[key]]));
 }
 
+/**
+ * Check a committed envelope for this request. A malformed envelope proves
+ * nothing (RESPONSE_INVALID); a well-formed record for the same ID with other
+ * fields is a content conflict. Only a GET result may decide that conflict.
+ */
 function validateResponse(body, expected) {
   if (!body || body.status !== 'committed' || !body.request ||
-      FIELDS.some((key) => body.request[key] !== expected[key]) ||
+      FIELDS.some((key) => typeof body.request[key] !== 'string') ||
+      body.request.request_id !== expected.request_id ||
       !body.database || typeof body.database.name !== 'string' ||
       !body.database.name || body.database.name.length > 256 ||
       typeof body.environment !== 'string' || !body.environment ||
       body.environment.length > 128) {
-    throw terminalError('RESPONSE_MISMATCH');
+    throw codedError('RESPONSE_INVALID');
+  }
+  if (FIELDS.some((key) => body.request[key] !== expected[key])) {
+    throw terminalError('CONTENT_CONFLICT');
   }
   return {environment: body.environment, database: {name: body.database.name},
     observedAt: new Date().toISOString()};
@@ -56,32 +75,41 @@ function label(value) {
       .replace(/"/g, '\\"') + '"';
 }
 
-/** Durable single-writer load generator; storage and app transport are separate. */
+/**
+ * Durable single-writer load generator; storage and app transport are
+ * separate.
+ */
 async function createTrafficBot({adapter, ledgerDir, ratePerSecond = 1,
-  maxPending = 1000, maxRecords = 100000, maxLedgerBytes = 64 * 1024 * 1024,
-  maxRequestAgeMs = 300000, maxAttempts = 20, requestTimeoutMs = 5000,
-  retryDelayMs = 1000, runId = randomUUID(), phase = 'onprem_live',
-  onSummary = () => {}, lockRetries = 0} = {}) {
+  maxPending = 1000, maxRecords = DEFAULT_MAX_RECORDS,
+  maxLedgerBytes = DEFAULT_MAX_LEDGER_BYTES, maxRequestAgeMs = 300000,
+  maxAttempts = 20, requestTimeoutMs = 5000, retryDelayMs = 1000, runId,
+  phase = 'onprem_live', onSummary = () => {}} = {}) {
   if (!adapter || typeof adapter.write !== 'function' ||
       typeof adapter.read !== 'function') {
     throw new TypeError('adapter.write and adapter.read are required');
   }
   if (!Number.isFinite(ratePerSecond) || ratePerSecond <= 0 ||
       ratePerSecond > 1000) {
-    throw new TypeError('ratePerSecond must be greater than 0 and at most 1000');
+    throw new TypeError(
+        'ratePerSecond must be greater than 0 and at most 1000');
   }
   for (const [name, value] of Object.entries({maxRequestAgeMs, maxAttempts,
     requestTimeoutMs, retryDelayMs})) {
     positiveInteger(value, name);
   }
-  if (typeof runId !== 'string' || !runId || runId.length > 200 ||
-      typeof phase !== 'string' || !phase || phase.length > 100) {
-    throw new TypeError('runId and phase must be bounded nonempty strings');
+  // Each writer needs its own run ID; it is never generated or defaulted.
+  if (typeof runId !== 'string' || !RUN_ID_PATTERN.test(runId)) {
+    throw new TypeError('runId must match ^[A-Za-z0-9_.-]{1,200}$');
+  }
+  if (typeof phase !== 'string' || !phase || phase.length > 100) {
+    throw new TypeError('phase must be a bounded nonempty string');
   }
   const ledger = await openLedger({dir: ledgerDir, maxPending, maxRecords,
-    maxLedgerBytes, lockRetries});
+    maxLedgerBytes, runId});
   try {
-    for (const entry of ledger.entries()) validateRequest(entry.request);
+    for (const entry of ledger.entries()) {
+      validateRequest(entry.request);
+    }
   } catch (error) {
     await ledger.close();
     throw error;
@@ -149,7 +177,8 @@ async function createTrafficBot({adapter, ledgerDir, ratePerSecond = 1,
     const elapsed = Date.now() - entry.enqueuedAt;
     await ledger.update(entry.request.request_id, {
       state: 'committed', completedAt: Date.now(), lastError: null,
-      observations: [...(priorObservation ? [priorObservation] : []), observation],
+      observations: [
+        ...(priorObservation ? [priorObservation] : []), observation],
     });
     latencies.push(elapsed);
     if (latencies.length > 1000) latencies.shift();
@@ -164,23 +193,30 @@ async function createTrafficBot({adapter, ledgerDir, ratePerSecond = 1,
       return await call('read', entry.request.request_id);
     } catch (error) {
       counters.read_errors++;
-      throw error;
+      // A failed read never proves that an earlier POST was not stored.
+      const unconfirmed = codedError(error.code);
+      unconfirmed.retryAfterMs = error.retryAfterMs;
+      throw unconfirmed;
     }
+  }
+
+  /**
+   * Settle a possibly committed POST by reading the same ID. Resolves true
+   * once committed, false if absent; throws CONTENT_CONFLICT (final) or an
+   * unconfirmed error.
+   */
+  async function resolveByRead(entry, postObservation) {
+    const found = await reconcile(entry);
+    if (!found) return false;
+    await commit(entry, found, postObservation);
+    return true;
   }
 
   async function reconcileFinal(entry, code) {
     try {
-      const found = await reconcile(entry);
-      if (found) {
-        await commit(entry, found);
-        return;
-      }
+      if (await resolveByRead(entry)) return;
     } catch (error) {
-      if (error.code === 'RESPONSE_MISMATCH') {
-        await ledger.update(entry.request.request_id, {state: 'failed',
-          lastError: 'RESPONSE_MISMATCH', completedAt: Date.now()});
-        return;
-      }
+      if (error.code === 'CONTENT_CONFLICT') return failOrRetry(entry, error);
     }
     if (!stopped) {
       await ledger.update(entry.request.request_id, {state: 'unknown',
@@ -193,23 +229,18 @@ async function createTrafficBot({adapter, ledgerDir, ratePerSecond = 1,
       if (entry.attempts > 0) {
         return reconcileFinal(entry, 'REQUEST_EXPIRED_UNCONFIRMED');
       }
-      await ledger.update(entry.request.request_id,
-          {state: 'failed', lastError: 'REQUEST_EXPIRED', completedAt: Date.now()});
+      await ledger.update(entry.request.request_id, {
+        state: 'failed', lastError: 'REQUEST_EXPIRED', completedAt: Date.now(),
+      });
       return;
     }
-    let error;
     // A prior attempt could have committed even if its response was lost.
     if (entry.attempts > 0) {
       try {
-        const found = await reconcile(entry);
-        if (found) {
-          await commit(entry, found);
-          return;
-        }
-      } catch (cause) {
-        error = cause;
+        if (await resolveByRead(entry)) return;
+      } catch (error) {
+        return failOrRetry(entry, error);
       }
-      if (error) return failOrRetry(entry, error);
     }
     if (entry.attempts >= maxAttempts) {
       await ledger.update(entry.request.request_id, {state: 'unknown',
@@ -220,52 +251,69 @@ async function createTrafficBot({adapter, ledgerDir, ratePerSecond = 1,
     await ledger.update(entry.request.request_id, {attempts});
     entry = {...entry, attempts};
     counters.write_attempts++;
-    let receivedWrite = false;
+    let result;
     try {
-      const result = await call('write', entry.request);
-      receivedWrite = true;
-      const observation = validateResponse(result, entry.request);
-      const found = await reconcile(entry);
-      if (!found) throw new Error('READ_NOT_FOUND');
-      await commit(entry, found, observation);
-      return;
-    } catch (cause) {
+      result = await call('write', entry.request);
+    } catch (error) {
       counters.write_errors++;
-      error = cause;
+      return handleWriteError(entry, error);
     }
-    if (!receivedWrite && error instanceof HttpError &&
-        error.status === 503 && error.notCommitted === true && !stopped) {
-      // This known refusal did not consume a potentially committed POST attempt.
-      entry = {...entry, attempts: entry.attempts - 1};
-      await ledger.update(entry.request.request_id, {attempts: entry.attempts});
+    return confirmWrite(entry, result);
+  }
+
+  async function confirmWrite(entry, result) {
+    let observation;
+    let postError;
+    try {
+      observation = validateResponse(result, entry.request);
+    } catch (error) {
+      // A 2xx body that fails validation says nothing about the stored row.
+      counters.write_errors++;
+      postError = codedError('RESPONSE_INVALID');
+    }
+    try {
+      if (await resolveByRead(entry, observation)) return;
+    } catch (error) {
+      return failOrRetry(entry,
+          error.code === 'CONTENT_CONFLICT' || !postError ? error : postError);
+    }
+    return failOrRetry(entry, postError || codedError('READ_NOT_FOUND'));
+  }
+
+  async function handleWriteError(entry, error) {
+    if (stopped) return;
+    if (error instanceof HttpError && error.status === 503 &&
+        error.notCommitted === true) {
+      // This known refusal did not consume a potentially committed POST
+      // attempt.
+      const refunded = {...entry, attempts: entry.attempts - 1};
+      await ledger.update(entry.request.request_id,
+          {attempts: refunded.attempts});
+      return failOrRetry(refunded, error);
+    }
+    // Explicit refusals are final; anything after a response is unconfirmed.
+    if (error.terminal && !error.afterResponse) {
       return failOrRetry(entry, error);
     }
-    if (!error.terminal && !stopped) {
-      try {
-        const found = await reconcile(entry);
-        if (found) {
-          await commit(entry, found);
-          return;
-        }
-      } catch (cause) {
-        // A malformed reconciliation response must never be retried as success.
-        if (cause.terminal) error = cause;
-      }
+    try {
+      if (await resolveByRead(entry)) return;
+    } catch (cause) {
+      if (cause.code === 'CONTENT_CONFLICT') return failOrRetry(entry, cause);
     }
     return failOrRetry(entry, error);
   }
 
   async function failOrRetry(entry, error) {
     if (stopped) return;
-    // Adapter errors are untrusted and may contain secrets; persist fixed codes.
-    const safeCodes = ['RESPONSE_MISMATCH', 'INVALID_JSON_RESPONSE',
-      'RESPONSE_TOO_LARGE', 'HTTP_TRANSPORT_ERROR', 'REQUEST_ABORTED',
-      'WRITES_PAUSED'];
+    // Adapter errors are untrusted and may contain secrets; persist fixed
+    // codes.
+    const safeCodes = ['RESPONSE_INVALID', 'CONTENT_CONFLICT',
+      'INVALID_JSON_RESPONSE', 'RESPONSE_TOO_LARGE', 'HTTP_TRANSPORT_ERROR',
+      'REQUEST_ABORTED', 'WRITES_PAUSED'];
+    const failed = Boolean(error.terminal) && !error.afterResponse;
     const code = safeCodes.includes(error.code) ||
       /^HTTP_[0-9]{3}$/.test(error.code || '') ? error.code :
-      (error.terminal ? 'PERMANENT_REQUEST_FAILURE' :
-        'TRANSIENT_REQUEST_FAILURE');
-    const failed = Boolean(error.terminal);
+      (failed ? 'PERMANENT_REQUEST_FAILURE' : 'TRANSIENT_REQUEST_FAILURE');
     await ledger.update(entry.request.request_id, {
       state: failed ? 'failed' : 'pending', lastError: code,
       nextAttemptAt: Date.now() + Math.min(maxRequestAgeMs,
@@ -335,7 +383,8 @@ async function createTrafficBot({adapter, ledgerDir, ratePerSecond = 1,
               counters.generation_blocked++;
             } else {
               counters.generation_errors++;
-              fatalCode = 'LEDGER_GENERATION_LIMIT_OR_IO_ERROR';
+              fatalCode = error.code === LOCK_LOST ? LOCK_LOST :
+                'LEDGER_GENERATION_LIMIT_OR_IO_ERROR';
               report();
               running = false;
               break;
@@ -350,8 +399,9 @@ async function createTrafficBot({adapter, ledgerDir, ratePerSecond = 1,
             });
           }
         }
-      })().catch(() => {
-        fatalCode = 'LEDGER_PROCESSING_FAILED';
+      })().catch((error) => {
+        fatalCode = error.code === LOCK_LOST ? LOCK_LOST :
+          'LEDGER_PROCESSING_FAILED';
         running = false;
         report();
       });
@@ -368,8 +418,10 @@ async function createTrafficBot({adapter, ledgerDir, ratePerSecond = 1,
         ...Object.entries(counters).map(([kind, count]) =>
           `traffic_bot_attempts_total{kind=${label(kind)}} ${count}`),
         '# TYPE traffic_bot_commit_latency_ms summary',
-        `traffic_bot_commit_latency_ms{quantile="0.95"} ${value.latency_ms.p95}`,
-        `traffic_bot_commit_latency_ms{quantile="0.99"} ${value.latency_ms.p99}`,
+        'traffic_bot_commit_latency_ms{quantile="0.95"} ' +
+          `${value.latency_ms.p95}`,
+        'traffic_bot_commit_latency_ms{quantile="0.99"} ' +
+          `${value.latency_ms.p99}`,
         '# TYPE traffic_bot_environment_commits_total counter',
         ...[...environments].map(([environment, count]) =>
           'traffic_bot_environment_commits_total' +
@@ -385,7 +437,9 @@ async function createTrafficBot({adapter, ledgerDir, ratePerSecond = 1,
       running = false;
       clearInterval(summaryTimer);
       wake.abort();
-      for (const controller of controllers) controller.abort();
+      for (const controller of controllers) {
+        controller.abort();
+      }
       if (loop) await loop;
       if (processing) await processing;
       finalSnapshot = snapshot();

@@ -1,3 +1,6 @@
+# CI: 테스트(실제 PostgreSQL) → 이미지 빌드 → 취약점 검사 → (main만) GHCR 게시
+# → GitOps 이미지 태그 갱신. 예선 issue #29 의 병렬화·main 스캔 생략을 되돌린
+# 이유와 비용은 docs/decisions/2026-11-04-ci-gate-after-db-tests.md(ADR-0003).
 name: ci
 on:
   push:
@@ -40,6 +43,8 @@ jobs:
           kubectl kustomize k8s/overlays/onprem > /tmp/ghost-onprem.yaml
           kubectl kustomize k8s/traffic-bot > /tmp/ghost-bot.yaml
   build:
+    # 실제 PG 시험을 통과한 커밋만 이미지로 나간다. 새 조직의 브랜치 보호를
+    # 확인하지 못했으므로 #29 ② 의 병렬화를 되돌렸다(ADR-0003).
     needs: test
     runs-on: ubuntu-latest
     env:
@@ -53,6 +58,8 @@ jobs:
         run: >-
           docker build --build-arg GIT_SHA=${{ github.sha }}
           -t ghcr.io/softbankhackathon2026/sample-app:${{ github.sha }} .
+      # PR 과 main 모두 스캔한다. 게시 대상 이미지를 직접 검사해야 PR 스캔 뒤
+      # 공개된 CVE 도 잡는다. 실패하면 우회 게시하지 않고 고친 뒤 다시 돈다(ADR-0003).
       - name: Scan image
         run: |
           docker save ghcr.io/softbankhackathon2026/sample-app:${{ github.sha }} -o "$RUNNER_TEMP/sample-app.tar"

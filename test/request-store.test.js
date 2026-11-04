@@ -10,14 +10,16 @@ const record = {
   payload: 'payload', created_at: '2026-11-04T09:00:00+09:00',
 };
 
-test('request normalization preserves bigint and normalizes UUID/timezone', () => {
-  assert.deepEqual(normalizeRequest(record), {
-    ...record, request_id: record.request_id.toLowerCase(), request_no: '1',
-    created_at: '2026-11-04T00:00:00.000Z',
-  });
-  assert.equal(normalizeRequest({...record,
-    request_no: '9223372036854775807'}).request_no, '9223372036854775807');
-});
+test('request normalization preserves bigint and normalizes UUID/timezone',
+    () => {
+      assert.deepEqual(normalizeRequest(record), {
+        ...record, request_id: record.request_id.toLowerCase(),
+        request_no: '1', created_at: '2026-11-04T00:00:00.000Z',
+      });
+      const max = '9223372036854775807';
+      assert.equal(normalizeRequest({...record, request_no: max}).request_no,
+          max);
+    });
 
 test('invalid, ambiguous or silently lossy request values are rejected', () => {
   for (const patch of [
@@ -30,6 +32,25 @@ test('invalid, ambiguous or silently lossy request values are rejected', () => {
     assert.throws(() => normalizeRequest({...record, ...patch}),
         {code: 'INVALID_REQUEST'});
   }
+});
+
+test('lone surrogates are rejected because PostgreSQL would replace them',
+    () => {
+      for (const field of ['run_id', 'phase', 'payload']) {
+        for (const text of ['\ud800', 'a\udc00', '\udc00\ud800']) {
+          assert.throws(() => normalizeRequest({...record, [field]: text}),
+              {code: 'INVALID_REQUEST'}, `${field} ${JSON.stringify(text)}`);
+        }
+      }
+    });
+
+test('astral Unicode characters are stored unchanged', () => {
+  const astral = 'run \u{1f47b}';  // 'run 👻'
+  const normalized = normalizeRequest({...record,
+    run_id: astral, phase: astral, payload: astral});
+  assert.equal(normalized.run_id, astral);
+  assert.equal(normalized.phase, astral);
+  assert.equal(normalized.payload, astral);
 });
 
 test('TLS URLs cannot silently override certificate verification', () => {
@@ -65,7 +86,9 @@ test('pause drains accepted writes and rejects subsequent ones', async () => {
     release() {},
   };
   const store = createPostgresRequestStore({
-    poolFactory: () => ({on() {}, connect: async () => client, end: async () => {}}),
+    poolFactory: () => ({
+      on() {}, connect: async () => client, end: async () => {},
+    }),
   });
   const write = store.put(record);
   await entered;
@@ -114,6 +137,119 @@ test('replacement blocks resume and concurrent replacement until old pool closes
       await store.close();
     });
 
+/** Builds a pool double whose clients answer reads from the given DB name. */
+function readablePool(name, overrides = {}) {
+  const row = normalizeRequest(record);
+  return {
+    on() {},
+    query: async () => ({rows: []}),
+    connect: async () => ({
+      async query(sql) {
+        if (sql.startsWith('SELECT current_database')) {
+          return {rows: [{name}]};
+        }
+        return {rows: [row]};
+      },
+      release() {},
+    }),
+    end: async () => {},
+    ...overrides,
+  };
+}
+
+test('old pool end failure keeps the validated candidate pool in service',
+    async () => {
+      const observations = [];
+      let candidateEnded = 0;
+      let calls = 0;
+      const store = createPostgresRequestStore({
+        onObservation: (event) => observations.push(event),
+        poolFactory: () => {
+          if (++calls === 1) {
+            return readablePool('old', {
+              end: async () => { throw new Error('old pool end failed'); },
+            });
+          }
+          return readablePool('candidate', {
+            end: async () => { candidateEnded++; },
+          });
+        },
+      });
+      await store.pauseWrites();
+      await store.replaceConnection({});
+      assert.equal(candidateEnded, 0);
+      assert.equal((await store.get(record.request_id)).database.name,
+          'candidate');
+      assert.ok(observations.some((event) =>
+        event.operation === 'connection' && event.outcome === 'error'));
+      store.resumeWrites();
+      assert.equal(store.writesPaused, false);
+      await store.close();
+      assert.equal(candidateEnded, 1);
+    });
+
+test('reads and readiness use the candidate while the old pool closes',
+    async () => {
+      let releaseOld;
+      const oldEnded = new Promise((resolve) => { releaseOld = resolve; });
+      let oldClosing;
+      const closing = new Promise((resolve) => { oldClosing = resolve; });
+      let calls = 0;
+      const store = createPostgresRequestStore({poolFactory: () => {
+        if (++calls === 1) {
+          return readablePool('old', {
+            async end() { oldClosing(); await oldEnded; },
+          });
+        }
+        return readablePool('candidate');
+      }});
+      await store.pauseWrites();
+      const replacement = store.replaceConnection({});
+      await closing;
+      assert.equal((await store.get(record.request_id)).database.name,
+          'candidate');
+      assert.deepEqual(await store.checkReady(), {name: 'candidate'});
+      assert.throws(() => store.resumeWrites(), {code: 'DB_UNAVAILABLE'});
+      await assert.rejects(store.replaceConnection({}),
+          {code: 'DB_UNAVAILABLE'});
+      await assert.rejects(store.put(record), {code: 'DB_UNAVAILABLE'});
+      releaseOld();
+      await replacement;
+      await store.close();
+    });
+
+test('close during old pool cleanup ends the candidate after cleanup',
+    async () => {
+      let releaseOld;
+      const oldEnded = new Promise((resolve) => { releaseOld = resolve; });
+      let oldClosing;
+      const closing = new Promise((resolve) => { oldClosing = resolve; });
+      const order = [];
+      let calls = 0;
+      const store = createPostgresRequestStore({poolFactory: () => {
+        if (++calls === 1) {
+          return readablePool('old', {async end() {
+            oldClosing();
+            await oldEnded;
+            order.push('old');
+          }});
+        }
+        return readablePool('candidate', {
+          async end() { order.push('candidate'); },
+        });
+      }});
+      await store.pauseWrites();
+      const replacement = store.replaceConnection({});
+      await closing;
+      const closed = store.close();
+      await assert.rejects(store.get(record.request_id),
+          {code: 'DB_UNAVAILABLE'});
+      releaseOld();
+      await replacement;
+      await closed;
+      assert.deepEqual(order, ['old', 'candidate']);
+    });
+
 test('direct core connection options cannot disable certificate verification',
     () => {
       assert.throws(() => createPostgresRequestStore({
@@ -125,6 +261,110 @@ test('direct core connection options cannot disable certificate verification',
       }), {code: 'INVALID_CONFIGURATION'});
     });
 
+/** Runs action with PGSSLMODE and pg.defaults.ssl set, then restores them. */
+function withDriverTlsDefaults({mode, ssl}, action) {
+  const {defaults} = require('pg');
+  const saved = {mode: process.env.PGSSLMODE, ssl: defaults.ssl};
+  if (mode === undefined) {
+    delete process.env.PGSSLMODE;
+  } else {
+    process.env.PGSSLMODE = mode;
+  }
+  defaults.ssl = ssl;
+  try {
+    return action();
+  } finally {
+    if (saved.mode === undefined) {
+      delete process.env.PGSSLMODE;
+    } else {
+      process.env.PGSSLMODE = saved.mode;
+    }
+    defaults.ssl = saved.ssl;
+  }
+}
+
+test('direct core rejects every TLS input the driver would leave unverified',
+    () => {
+      const url = 'postgres://user:pass@db/demo';
+      const inputs = [
+        'no-verify', 'true', 'require', '', null, 0, 1, [],
+        {rejectUnauthorized: false}, {rejectUnauthorized: 0},
+        {rejectUnauthorized: undefined}, {rejectUnauthorized: 'false'},
+        {checkServerIdentity: () => undefined},
+      ];
+      for (const ssl of inputs) {
+        let pools = 0;
+        assert.throws(() => createPostgresRequestStore({
+          connectionString: url, ssl,
+          poolFactory: () => { pools++; },
+        }), {code: 'INVALID_CONFIGURATION'}, String(JSON.stringify(ssl)));
+        assert.equal(pools, 0);
+      }
+    });
+
+test('omitted ssl rejects driver defaults that disable verification', () => {
+  for (const defaultsInput of [
+    {mode: 'no-verify', ssl: false}, {mode: undefined, ssl: 'no-verify'},
+    {mode: undefined, ssl: {rejectUnauthorized: false}},
+  ]) {
+    withDriverTlsDefaults(defaultsInput, () => {
+      assert.throws(() => createPostgresRequestStore({
+        connectionString: 'postgres://user:pass@db/demo',
+        poolFactory: () => assert.fail('pool must not be created'),
+      }), {code: 'INVALID_CONFIGURATION'}, JSON.stringify(defaultsInput));
+    });
+  }
+});
+
+test('accepted TLS inputs always reach pg.Client with verification on', () => {
+  const {Client} = require('pg');
+  const cases = [
+    [{mode: undefined, ssl: false}, true, true],
+    [{mode: undefined, ssl: false}, false, false],
+    [{mode: undefined, ssl: false}, undefined, false],
+    [{mode: 'require', ssl: false}, undefined, true],
+    [{mode: undefined, ssl: false}, {ca: 'PEM'}, {ca: 'PEM'}],
+    [{mode: undefined, ssl: false}, {rejectUnauthorized: true, ca: 'PEM'},
+      {rejectUnauthorized: true, ca: 'PEM'}],
+  ];
+  for (const [defaultsInput, ssl, expected] of cases) {
+    withDriverTlsDefaults(defaultsInput, () => {
+      let config;
+      const store = createPostgresRequestStore({
+        connectionString: 'postgres://user:pass@db/demo', ssl,
+        poolFactory: (poolConfig) => {
+          config = poolConfig;
+          return {on() {}, end: async () => {}};
+        },
+      });
+      // Resolve TLS exactly as the driver will, without opening a socket.
+      const finalSsl = new Client(config).connectionParameters.ssl;
+      assert.deepEqual(finalSsl, expected, JSON.stringify(ssl));
+      assert.notEqual(finalSsl?.rejectUnauthorized, false);
+      return store.close();
+    });
+  }
+});
+
+test('invalid connection strings fail without echoing the secret', () => {
+  const {inspect} = require('node:util');
+  for (const connectionString of [
+    'host=db user=app password=dsn-secret-1', 'postgres://app:dsn-secret-1@[',
+  ]) {
+    let error;
+    try {
+      createPostgresRequestStore({connectionString,
+        poolFactory: () => assert.fail('pool must not be created')});
+    } catch (caught) {
+      error = caught;
+    }
+    assert.equal(error?.code, 'INVALID_CONFIGURATION');
+    assert.equal(error.cause, undefined);
+    assert.doesNotMatch(inspect(error, {showHidden: true, depth: 5}),
+        /dsn-secret-1/);
+    assert.doesNotMatch(JSON.stringify(error), /dsn-secret-1/);
+  }
+});
 
 test('payload cap counts UTF-8 bytes and includes multibyte boundaries', () => {
   assert.equal(normalizeRequest({...record,
@@ -192,7 +432,8 @@ test('driver failures discard connections; rolled-back conflicts reuse them',
         });
         assert.equal(poolConfig.keepAlive, true);
         assert.equal(released.length, 1);
-        assert.equal(released[0], mode === 'conflict' ? undefined : driverError);
+        assert.equal(released[0],
+            mode === 'conflict' ? undefined : driverError);
         await store.close();
       }
     });
@@ -243,9 +484,11 @@ test('readiness checks schema access without scanning or counting rows',
 test('unsupported JSON charsets return the documented 400 error envelope',
     async (t) => {
       const express = require('express');
-      const {createRequestRouter} = require('../packages/request-store/express');
+      const {createRequestRouter} =
+          require('../packages/request-store/express');
       const app = express();
-      app.use('/requests', createRequestRouter({store: null}));
+      app.use('/requests', createRequestRouter({store: null,
+        getContext: () => ({environment: 'test'})}));
       const server = app.listen(0, '127.0.0.1');
       await new Promise((resolve) => server.once('listening', resolve));
       t.after(() => new Promise((resolve) => server.close(resolve)));
@@ -259,4 +502,46 @@ test('unsupported JSON charsets return the documented 400 error envelope',
       assert.deepEqual(await response.json(), {error: {
         code: 'INVALID_REQUEST', message: 'Invalid JSON request body',
       }});
+    });
+
+test('request router requires a getContext function at creation', () => {
+  const {createRequestRouter} = require('../packages/request-store/express');
+  assert.throws(() => createRequestRouter({store: null}), TypeError);
+  assert.throws(() => createRequestRouter({store: null, getContext: {}}),
+      TypeError);
+});
+
+test('invalid response context returns 500 before the store is touched',
+    async (t) => {
+      const express = require('express');
+      const {createRequestRouter} =
+          require('../packages/request-store/express');
+      let storeCalls = 0;
+      const store = {
+        async put() { storeCalls++; throw new Error('must not write'); },
+        async get() { storeCalls++; throw new Error('must not read'); },
+      };
+      const app = express();
+      for (const [path, context] of [
+        ['/empty', {environment: ''}], ['/missing', {region: 'local'}],
+        ['/number', {environment: 1}], ['/none', undefined],
+      ]) {
+        app.use(path, createRequestRouter({store, getContext: () => context}));
+      }
+      const server = app.listen(0, '127.0.0.1');
+      await new Promise((resolve) => server.once('listening', resolve));
+      t.after(() => new Promise((resolve) => server.close(resolve)));
+      const base = `http://127.0.0.1:${server.address().port}`;
+      for (const path of ['/empty', '/missing', '/number', '/none']) {
+        for (const response of [
+          await fetch(`${base}${path}`, {method: 'POST',
+            headers: {'content-type': 'application/json'},
+            body: JSON.stringify(record)}),
+          await fetch(`${base}${path}/${record.request_id}`),
+        ]) {
+          assert.equal(response.status, 500);
+          assert.equal((await response.json()).error.code, 'CONTEXT_INVALID');
+        }
+      }
+      assert.equal(storeCalls, 0);
     });

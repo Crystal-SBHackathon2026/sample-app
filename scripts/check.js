@@ -16,4 +16,6 @@ function check(directory) {
   }
 }
 
-for (const directory of ['src', 'packages', 'scripts', 'test']) check(directory);
+for (const directory of ['src', 'packages', 'scripts', 'test']) {
+  check(directory);
+}

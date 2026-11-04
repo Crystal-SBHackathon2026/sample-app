@@ -12,23 +12,46 @@ class HttpError extends Error {
   }
 }
 
+/**
+ * A 2xx arrived but its body was unusable. The server may still have
+ * committed, so this is not terminal; the bot settles it with a GET.
+ */
+function afterResponseError(code) {
+  const error = new Error(code);
+  error.code = code;
+  error.afterResponse = true;
+  return error;
+}
+
+/**
+ * Raw characters the URL parser rewrites (backslash becomes '/') or drops
+ * (tab, CR, LF) can turn a path into '//host', and controls, spaces, '?' and
+ * '#' have no place in a plain path. They are refused, never repaired.
+ */
+const UNSAFE_PATH_CHARACTERS = /[\\\u0000- \u007f?#]/;
+
 /** Adapt a compatible request API to the bot's write/read interface. */
 function createHttpAdapter({baseUrl, requestsPath = '/api/requests',
   headers = {}, maxResponseBytes = 512 * 1024} = {}) {
   const base = new URL(baseUrl);
   if (!['http:', 'https:'].includes(base.protocol) ||
       base.username || base.password || base.search || base.hash) {
-    throw new TypeError('baseUrl must be HTTP(S) without credentials/query/hash');
+    throw new TypeError(
+        'baseUrl must be HTTP(S) without credentials/query/hash');
   }
   if (typeof requestsPath !== 'string' ||
       !requestsPath.startsWith('/') || requestsPath.startsWith('//') ||
-      requestsPath.includes('?') || requestsPath.includes('#')) {
+      UNSAFE_PATH_CHARACTERS.test(requestsPath)) {
     throw new TypeError('requestsPath must be an absolute URL path');
   }
   if (!Number.isSafeInteger(maxResponseBytes) || maxResponseBytes < 1) {
     throw new TypeError('maxResponseBytes must be positive');
   }
   const endpoint = new URL(requestsPath.replace(/\/$/, ''), base);
+  // Custom headers (for example credentials) must never reach another origin.
+  if (endpoint.origin !== base.origin) {
+    throw new TypeError('requestsPath must stay on the baseUrl origin');
+  }
 
   async function invoke(method, suffix, request, {signal} = {}) {
     let response;
@@ -87,20 +110,14 @@ function createHttpAdapter({baseUrl, requestsPath = '/api/requests',
     for await (const chunk of response.body) {
       size += chunk.byteLength;
       if (size > maxResponseBytes) {
-        const error = new Error('RESPONSE_TOO_LARGE');
-        error.code = 'RESPONSE_TOO_LARGE';
-        error.terminal = true;
-        throw error;
+        throw afterResponseError('RESPONSE_TOO_LARGE');
       }
       chunks.push(chunk);
     }
     try {
       return JSON.parse(Buffer.concat(chunks).toString('utf8'));
     } catch (cause) {
-      const error = new Error('INVALID_JSON_RESPONSE');
-      error.code = 'INVALID_JSON_RESPONSE';
-      error.terminal = true;
-      throw error;
+      throw afterResponseError('INVALID_JSON_RESPONSE');
     }
   }
 

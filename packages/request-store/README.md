@@ -22,6 +22,9 @@ app.use('/api/requests', createRequestRouter({
 }));
 ```
 
+router는 인증하지 않는다. 인증과 접근 제한 같은 노출 정책은 호스트 앱이
+router 앞에 둔다. 공개 진입점에 익명 쓰기를 열어 두지 않는다.
+
 프레임워크가 다른 경우 `store.put(record)`, `store.get(uuid)`,
 `store.status()`를 호출하고 원하는 HTTP 응답으로 변환한다.
 이 모듈은 샘플 앱의 환경변수나 지표 구현을 import하지 않는다.
@@ -89,6 +92,9 @@ INSERT와 비교 SELECT를 같은 연결에서 수행하고 COMMIT 후에만 반
 Express 어댑터는 POST `/`와 GET `/:id`를 제공한다.
 POST는 신규 저장 201, 기존 커밋 200, 충돌 409, 입력 오류 400,
 쓰기 정지·DB 장애 503이다. GET은 존재 200, 없음 404다.
+`getContext`는 필수 함수다. 없으면 `createRequestRouter`가 `TypeError`를
+던진다. 반환값에 비어 있지 않은 `environment` 문자열이 없으면 POST는
+`store.put` 전에, GET은 조회 전에 500 `CONTEXT_INVALID`로 거절한다.
 JSON 요청 본문은 최대 512 KiB다.
 정지 상태에서는 `Retry-After: 1`을 보낸다. 실패 응답은
 `{error:{code,message}}`이며 접속 정보·SQL 오류 원문을 노출하지 않는다.
@@ -106,8 +112,12 @@ await store.close();
 ```
 
 풀 변경에는 정지 상태가 필요하다. 후보 DB에서 테이블 조회를 먼저 확인하고
-기존 풀을 종료한다. 실패하면 쓰기는 계속 정지하며 기존 DB로 자동 쓰기하지 않는다.
-변경 중 조회는 일시적으로 503일 수 있다. 정지 상태만으로는 조회가 차단되지 않는다.
+참조를 후보 풀로 바꾼 뒤 기존 풀을 best-effort로 종료한다. 기존 풀 종료가
+실패해도 교체는 성공하며 `connection`/`error` 관측만 남기고 후보 풀은 닫지
+않는다. 후보 검증이 실패하면 쓰기는 계속 정지하며 기존 DB로 자동 쓰기하지 않는다.
+조회는 drain·후보 검증 동안만 503이고, 참조 교체 뒤에는 기존 풀 정리 중에도
+후보 풀로 응답한다. 쓰기·`resumeWrites`·다른 교체는 정리가 끝날 때까지
+`DB_UNAVAILABLE`이다. 정지 상태만으로는 조회가 차단되지 않는다.
 `store.inFlightWrites`는 아직 완료되지 않은 쓰기 수를 읽기 전용으로 제공한다.
 `pauseWrites`는 이 store 인스턴스의 쓰기만 통제한다. 여러 replica의 제어와
 DB 권한 차단을 수행하지 않으며 전환 오케스트레이터를 대체하지 않는다.
@@ -129,9 +139,24 @@ DB 권한 차단을 수행하지 않으며 전환 오케스트레이터를 대�
 
 URL의 `sslmode`는 helper가 제거해 명시적인 검증 설정으로 바꾼다.
 다른 URL SSL 키는 거절한다.
-`DB_SSL=true` 또는 CA가 지정됐는데 TLS 모드가 `disable`이면 설정을 거절한다. 코어에 직접 options를 전달할 때는 URL에
-SSL 키를 넣지 말고 `ssl: {rejectUnauthorized: true, ca}`를 전달한다.
-인증서 검증을 끄는 설정은 허용하지 않는다. 로컬 평문은 `ssl: false`다.
+`DB_SSL=true` 또는 CA가 지정됐는데 TLS 모드가 `disable`이면 설정을 거절한다.
+코어에 직접 options를 전달할 때는 URL에 SSL 키를 넣지 말고
+`ssl: {rejectUnauthorized: true, ca}`를 전달한다. 로컬 평문은 `ssl: false`다.
+
+코어가 받는 `ssl`은 `true`, `false`, 미지정, 인증서를 검증하는 객체뿐이다.
+`'no-verify'` 같은 문자열, `null`, 숫자, 배열은 거절한다.
+`rejectUnauthorized`가 `true`가 아니거나 `checkServerIdentity`를 바꾸는
+객체도 거절한다. `ssl`을 생략하면 드라이버가 대신 읽는
+`PGSSLMODE=no-verify`와 `pg.defaults.ssl`도 같은 규칙으로 검사한다.
+거절은 모두 `INVALID_CONFIGURATION`이다. URL로 해석되지 않는 접속 문자열도
+원문을 메시지·속성·cause에 남기지 않는 같은 오류로 거절한다.
+
+`require`, `verify-ca`, `verify-full`은 모두 인증서 체인 검증과 Node 기본
+호스트명 검증을 수행한다. libpq의 `require`(검증 없음)와 `verify-ca`(호스트명
+미검증)보다 강한 최소 정책이며, 이 모듈은 그 약한 의미를 제공하지 않는다.
+서버 인증서는 주입한 CA로 검증돼야 하고 SAN이 접속 호스트와 맞아야 한다.
+RDS CA는 이미지에 넣지 않고 `PGSSLROOTCERT` 파일로 외부 주입한다. 이 설명은
+정책이며 실제 운영 DB의 TLS 접속 검증을 대신하지 않는다.
 
 선택 옵션 `writesPaused`로 시작부터 쓰기를 막을 수 있다.
 `onObservation({operation,outcome,seconds})`으로 지표를 연결할 수 있다.

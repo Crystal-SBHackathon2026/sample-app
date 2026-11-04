@@ -10,9 +10,10 @@ const {createRequestRouter} = require('../packages/request-store/express');
 
 const connectionString = process.env.TEST_DATABASE_URL;
 
-test('real PostgreSQL API: duplicate, conflict, pause/read and pool replacement',
+test(
+    'real PostgreSQL API: duplicate, conflict, pause/read and pool replacement',
     {skip: !connectionString}, async (t) => {
-      // Only TEST_DATABASE_URL is used. Rows owned by this test run are removed.
+      // Only TEST_DATABASE_URL is used. Rows owned by this run are removed.
       const admin = new Pool({connectionString});
       const run = `test-${randomUUID()}`;
       const store = createPostgresRequestStore({connectionString});
@@ -36,8 +37,8 @@ test('real PostgreSQL API: duplicate, conflict, pause/read and pool replacement'
       assert.equal(writes.filter((result) => result.created).length, 1);
       assert.deepEqual((await store.get(input.request_id)).request, input);
       assert.equal((await admin.query(
-          'SELECT count(*)::text AS n FROM public.migration_demo WHERE run_id=$1',
-          [run])).rows[0].n, '1');
+          `SELECT count(*)::text AS n FROM public.migration_demo
+          WHERE run_id=$1`, [run])).rows[0].n, '1');
       for (const patch of [
         {payload: 'different'}, {run_id: 'another'}, {phase: 'aws_live'},
         {request_no: '1'}, {created_at: '2026-11-04T00:00:00.124Z'},
@@ -85,7 +86,8 @@ test('real PostgreSQL API: duplicate, conflict, pause/read and pool replacement'
       assert.equal(store.writesPaused, true);
       assert.deepEqual((await store.get(input.request_id)).request, input);
       const invalidConnection = new URL(connectionString);
-      invalidConnection.pathname = `/missing_${randomUUID().replaceAll('-', '')}`;
+      const missing = randomUUID().replaceAll('-', '');
+      invalidConnection.pathname = `/missing_${missing}`;
       await assert.rejects(store.replaceConnection({
         connectionString: invalidConnection.toString(),
         connectionTimeoutMillis: 100,
@@ -95,4 +97,100 @@ test('real PostgreSQL API: duplicate, conflict, pause/read and pool replacement'
       store.resumeWrites();
       assert.equal((await store.put({...input,
         request_id: randomUUID()})).created, true);
+    });
+
+test('real PostgreSQL: lone surrogates are rejected; astral text round-trips',
+    {skip: !connectionString}, async (t) => {
+      const admin = new Pool({connectionString});
+      const run = `test-${randomUUID()}`;
+      const store = createPostgresRequestStore({connectionString});
+      let server;
+      t.after(async () => {
+        if (server) await new Promise((resolve) => server.close(resolve));
+        await store.close();
+        await admin.query('DELETE FROM public.migration_demo WHERE run_id=$1',
+            [run]);
+        await admin.end();
+      });
+      const input = {
+        request_id: randomUUID(), run_id: run, phase: 'onprem_live',
+        request_no: '1', payload: 'ghost \u{1f47b}',  // 'ghost 👻'
+        created_at: '2026-11-04T00:00:00.000Z',
+      };
+      assert.equal((await store.put(input)).created, true);
+      assert.deepEqual((await store.get(input.request_id)).request, input);
+      const app = express();
+      app.use('/api/requests', createRequestRouter({store,
+        getContext: () => ({environment: 'test', region: 'local'})}));
+      server = app.listen(0, '127.0.0.1');
+      await new Promise((resolve) => server.once('listening', resolve));
+      const base = `http://127.0.0.1:${server.address().port}/api/requests`;
+      const lone = {...input, request_id: randomUUID(), payload: '\ud800'};
+      const response = await fetch(base, {method: 'POST',
+        headers: {'content-type': 'application/json'},
+        body: JSON.stringify(lone)});
+      assert.equal(response.status, 400);
+      assert.equal((await response.json()).error.code, 'INVALID_REQUEST');
+      await assert.rejects(store.put({...lone, request_id: randomUUID()}),
+          {code: 'INVALID_REQUEST'});
+      assert.equal((await admin.query(
+          'SELECT count(*)::text AS n FROM public.migration_demo ' +
+          'WHERE run_id=$1', [run])).rows[0].n, '1');
+    });
+
+test('real PostgreSQL: invalid context writes nothing; old pool end failure',
+    {skip: !connectionString}, async (t) => {
+      const admin = new Pool({connectionString});
+      const run = `test-${randomUUID()}`;
+      const observations = [];
+      let pools = 0;
+      const store = createPostgresRequestStore({connectionString,
+        onObservation: (event) => observations.push(event),
+        poolFactory: (config) => {
+          const created = new Pool(config);
+          if (++pools === 1) {
+            const end = created.end.bind(created);
+            created.end = async () => {
+              await end();
+              throw new Error('synthetic old pool end failure');
+            };
+          }
+          return created;
+        }});
+      let server;
+      t.after(async () => {
+        if (server) await new Promise((resolve) => server.close(resolve));
+        await store.close();
+        await admin.query('DELETE FROM public.migration_demo WHERE run_id=$1',
+            [run]);
+        await admin.end();
+      });
+      const input = {
+        request_id: randomUUID(), run_id: run, phase: 'onprem_live',
+        request_no: '1', payload: 'context probe',
+        created_at: '2026-11-04T00:00:00.000Z',
+      };
+      const app = express();
+      app.use('/api/requests', createRequestRouter({store,
+        getContext: () => ({environment: ''})}));
+      server = app.listen(0, '127.0.0.1');
+      await new Promise((resolve) => server.once('listening', resolve));
+      const response = await fetch(
+          `http://127.0.0.1:${server.address().port}/api/requests`, {
+            method: 'POST', headers: {'content-type': 'application/json'},
+            body: JSON.stringify(input)});
+      assert.equal(response.status, 500);
+      assert.equal((await response.json()).error.code, 'CONTEXT_INVALID');
+      assert.equal((await admin.query(
+          'SELECT count(*)::text AS n FROM public.migration_demo ' +
+          'WHERE run_id=$1', [run])).rows[0].n, '0');
+      await store.pauseWrites();
+      await store.replaceConnection({connectionString});
+      assert.equal(pools, 2);
+      assert.ok(observations.some((event) =>
+        event.operation === 'connection' && event.outcome === 'error'));
+      assert.equal((await store.get(input.request_id)).request, null);
+      assert.ok((await store.checkReady()).name);
+      store.resumeWrites();
+      assert.equal((await store.put(input)).created, true);
     });

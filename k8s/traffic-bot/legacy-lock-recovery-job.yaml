@@ -1,0 +1,86 @@
+# 일회성 업그레이드 복구 Job — 옛 봇의 빈 legacy 잠금 디렉터리만 지운다.
+#
+# 🔴 kustomization.yaml 에 넣지 않는다. 자동 적용되면 안 된다.
+# 언제: proper-lockfile 을 쓰던 옛 봇에서 새 봇(커널 flock)으로 처음 올릴 때,
+# 새 봇이 LEDGER_LEGACY_LOCK 으로 시작을 거절한 경우에만. 새 봇끼리의 crash
+# 재시작은 커널이 잠금을 풀므로 이 Job 이 필요 없다.
+#
+# 순서 (docs/deployment.md "legacy 잠금 복구"):
+#   1. kubectl -n hackathon scale deployment/traffic-bot --replicas=0
+#   2. 옛 봇 Pod 가 모두 종료됐는지 확인한다. 응답 없는 노드에 붙어 있던
+#      볼륨은 그 노드의 종료·fencing 을 확인하기 전에 옮기지 않는다.
+#   3. kubectl apply -f k8s/traffic-bot/legacy-lock-recovery-job.yaml
+#   4. kubectl -n hackathon logs job/traffic-bot-legacy-lock-recovery 로
+#      REMOVED 또는 NOOP 을 확인한 뒤 Job 을 지운다.
+#   5. 새 이미지로 Deployment 를 replicas 1 로 되돌린다.
+#
+# 지우는 것은 /data/ledger.lock 이 symlink 가 아닌 빈 디렉터리일 때 그것뿐이다.
+# ledger.json 과 새 잠금 파일 /data/ledger/.owner.lock 은 건드리지 않는다.
+# 그 밖의 상태면 아무것도 지우지 않고 실패한다.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: traffic-bot-legacy-lock-recovery
+  namespace: hackathon
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app: traffic-bot-legacy-lock-recovery
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: recover
+          # node:22-alpine 멀티 아키텍처 index digest (2026-11-04 확인).
+          image: node:22-alpine@sha256:fe4f6d74e20370acb04ad889077d14d0f64a9c8ea6a42bc60cddf1e844699914
+          command:
+            - sh
+            - -c
+            - |
+              set -eu
+              lock=/data/ledger.lock
+              if [ -L "$lock" ]; then
+                echo "REFUSED: $lock is a symlink" >&2
+                exit 3
+              fi
+              if [ ! -e "$lock" ]; then
+                echo "NOOP: $lock does not exist"
+                exit 0
+              fi
+              if [ ! -d "$lock" ]; then
+                echo "REFUSED: $lock is not a directory" >&2
+                exit 3
+              fi
+              if ! rmdir "$lock"; then
+                echo "REFUSED: $lock is not empty" >&2
+                exit 3
+              fi
+              echo "REMOVED: empty legacy lock directory $lock"
+          volumeMounts:
+            - name: ledger
+              mountPath: /data
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+      volumes:
+        - name: ledger
+          persistentVolumeClaim:
+            claimName: traffic-bot-ledger

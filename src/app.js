@@ -2,6 +2,7 @@ const express = require('express');
 const {createRequestRouter} = require('@team-ghost/request-store/express');
 const {createMetrics} = require('./metrics');
 const {createStoreFromEnv} = require('./db');
+const {createRequestApiAuth} = require('./request-api-auth');
 const {createWriteControl} = require('./write-control');
 
 const info = {
@@ -29,11 +30,19 @@ function createApp(options = {}) {
   });
   const store = options.store === undefined ?
       createStoreFromEnv(env, metrics.observeDatabase) : options.store;
+  const logger = options.logger || console;
   const control = createWriteControl({
     store,
     file: env.APP_CONTROL_FILE,
     initiallyPaused: env.WRITES_PAUSED === 'true',
+    onHealthChange: (healthy) => {
+      metrics.setWriteControlHealthy(healthy);
+      logger.warn(healthy ?
+          'write control file recovered' :
+          'write control file invalid; writes stay paused');
+    },
   });
+  const requestApiAuth = createRequestApiAuth({env, logger, metrics});
   app.locals.store = store;
   app.locals.draining = false;
   app.locals.close = async () => {
@@ -60,7 +69,7 @@ function createApp(options = {}) {
   let statusPending;
   async function databaseStatus() {
     await control.refresh();
-    if (!store || !control.healthy) throw new Error('DB unavailable');
+    if (!store) throw new Error('DB unavailable');
     if (cachedStatus && Date.now() < statusExpiresAt) return cachedStatus;
     // Coalesce diagnostic counts; public diagnostics must not exhaust the
     // same connection pool that commits requests. Readiness never counts rows.
@@ -78,15 +87,15 @@ function createApp(options = {}) {
 
   app.get('/readyz', async (req, res) => {
     try {
+      // Control health only gates writes; readiness reflects DB reads.
       await control.refresh();
-      if (!store || !control.healthy || app.locals.draining) {
+      if (!store || app.locals.draining) {
         throw new Error('Not ready');
       }
-      if (store.checkReady) {
-        await store.checkReady();
-      } else {
-        await store.status();
-      }
+      const database = store.checkReady ?
+          await store.checkReady() : await store.status();
+      // An outage clears the DB identity; a successful check restores it.
+      if (database?.name) metrics.setDatabase(database.name);
       res.json({status: 'ok'});
     } catch {
       metrics.setDatabase(null);
@@ -104,6 +113,7 @@ function createApp(options = {}) {
       res.json({
         ...appInfo, database, writes_paused: store?.writesPaused || false,
         writes_in_flight: store?.inFlightWrites || 0,
+        write_control: {healthy: control.healthy},
       });
     } catch {
       res.status(503).json({error: {
@@ -112,6 +122,8 @@ function createApp(options = {}) {
     }
   });
 
+  // Auth answers before the control file, the body parser and the store.
+  app.use('/api/requests', requestApiAuth.middleware);
   app.use('/api/requests', async (req, res, next) => {
     try {
       await control.refresh();

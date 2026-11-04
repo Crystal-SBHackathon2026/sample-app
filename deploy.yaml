@@ -1,5 +1,14 @@
 # Compatibility input for the existing DeploySpec renderer.
-# The directly usable Kubernetes manifests are under k8s/.
+# The directly usable Kubernetes manifests are under k8s/ (standalone examples).
+#
+# 본선 AWS 배포의 적용 순서 — 뒤 층이 앞 층을 덮는다.
+#   1. gitops apps/sample-app/base          사람이 관리: Rollout·Service·제어 ConfigMap
+#   2. gitops apps/sample-app/overlays/aws  생성물: 이 파일을 review-service 렌더러가 렌더
+#   3. gitops apps/sample-app/runtime/aws   사람이 관리: DB Secret·TLS CA·제어 파일
+#                                           env·mount, readiness timeout, 제어 초기값
+# 이 파일에는 DeploySpec 으로 표현되는 값만 둔다. 렌더러는 컨테이너를 통째로 다시
+# 만들고 Secret 이름을 <app>-secrets 로 고정하므로 DB 연결·CA·제어 파일은 3층이
+# 넣는다. 자세한 내용은 docs/deployment.md.
 api_version: crystal.review/v1alpha1
 kind: DeploySpec
 metadata:
@@ -8,14 +17,14 @@ metadata:
 target:
   env: aws
   region: ap-northeast-2
-  namespace: hackathon
+  namespace: sample-app
 image:
   repository: ghcr.io/softbankhackathon2026/sample-app
   platforms:
     - amd64
 runtime:
   port: 8080
-  replicas: 2
+  replicas: 3
   health:
     liveness: /healthz
     readiness: /readyz
@@ -28,15 +37,8 @@ runtime:
     DEPLOY_ENV: aws
     DEPLOY_REGION: ap-northeast-2
     FAIL_RATE: '0'
-    DB_SSL: 'true'
 network:
   ingress:
-    public: false
-    tls: true
-secrets:
-  - name: DATABASE_URL
-    source: k8s-secret
-    key: database-url
-  - name: DB_SSL_CA
-    source: k8s-secret
-    key: rds-ca-pem
+    public: true
+    tls: false
+secrets: []

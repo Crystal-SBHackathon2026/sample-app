@@ -1,7 +1,11 @@
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const {randomUUID} = require('node:crypto');
-const lockfile = require('proper-lockfile');
+const {acquireOwnerLock} = require('./owner-lock');
+
+// A JSON snapshot rewrites the whole file per change, so keep it bounded.
+const DEFAULT_MAX_RECORDS = 10000;
+const DEFAULT_MAX_LEDGER_BYTES = 8 * 1024 * 1024;
 
 function positiveInteger(value, name) {
   if (!Number.isSafeInteger(value) || value < 1) {
@@ -10,9 +14,13 @@ function positiveInteger(value, name) {
   return value;
 }
 
-/** Open one durable, bounded journal. One process may own a directory. */
-async function openLedger({dir, maxPending = 1000, maxRecords = 100000,
-  maxLedgerBytes = 64 * 1024 * 1024, lockRetries = 0} = {}) {
+/**
+ * Open one durable, bounded journal. One process may own a directory; runId
+ * is written to the owner lock for diagnostics only.
+ */
+async function openLedger({dir, maxPending = 1000,
+  maxRecords = DEFAULT_MAX_RECORDS, maxLedgerBytes = DEFAULT_MAX_LEDGER_BYTES,
+  runId = null} = {}) {
   if (typeof dir !== 'string' || !dir) {
     throw new TypeError('ledger dir is required');
   }
@@ -20,19 +28,13 @@ async function openLedger({dir, maxPending = 1000, maxRecords = 100000,
   positiveInteger(maxRecords, 'maxRecords');
   positiveInteger(maxLedgerBytes, 'maxLedgerBytes');
   await fs.mkdir(dir, {recursive: true, mode: 0o700});
-  let compromised;
-  const release = await lockfile.lock(dir, {
-    realpath: true, stale: 10000, update: 2000, retries: lockRetries,
-    onCompromised: () => {
-      compromised = new Error('ledger lock compromised');
-    },
-  });
+  const lock = await acquireOwnerLock(dir, {runId});
   const filename = path.join(dir, 'ledger.json');
   let data;
   let closed = false;
   let queue = Promise.resolve();
   try {
-    // Exclusive lease is acquired before cleaning snapshots left by a crash.
+    // Exclusive lock is acquired before cleaning snapshots left by a crash.
     for (const name of await fs.readdir(dir)) {
       if (/^\.ledger-[0-9a-f-]+\.tmp$/.test(name)) {
         await fs.rm(path.join(dir, name), {force: true});
@@ -57,7 +59,8 @@ async function openLedger({dir, maxPending = 1000, maxRecords = 100000,
     for (const entry of data.entries) {
       if (!entry.request || typeof entry.request.request_id !== 'string' ||
           ids.has(entry.request.request_id) ||
-          !['pending', 'committed', 'failed', 'unknown'].includes(entry.state) ||
+          !['pending', 'committed', 'failed', 'unknown']
+              .includes(entry.state) ||
           !Number.isSafeInteger(entry.attempts) || entry.attempts < 0 ||
           !Number.isSafeInteger(entry.enqueuedAt) || entry.enqueuedAt < 0 ||
           !Number.isSafeInteger(entry.nextAttemptAt) ||
@@ -67,12 +70,11 @@ async function openLedger({dir, maxPending = 1000, maxRecords = 100000,
       ids.add(entry.request.request_id);
     }
   } catch (error) {
-    await release();
+    await lock.release();
     throw error;
   }
 
   function checkOpen() {
-    if (compromised) throw compromised;
     if (closed) throw new Error('ledger is closed');
   }
 
@@ -91,6 +93,8 @@ async function openLedger({dir, maxPending = 1000, maxRecords = 100000,
       await handle.close();
       handle = null;
       checkOpen();
+      // Never publish a snapshot after the lock file was swapped or removed.
+      await lock.assertHeld();
       await fs.rename(temporary, filename);
       const directory = await fs.open(dir, 'r');
       try {
@@ -159,9 +163,10 @@ async function openLedger({dir, maxPending = 1000, maxRecords = 100000,
       if (closed) return;
       await queue;
       closed = true;
-      await release();
+      await lock.release();
     },
   };
 }
 
-module.exports = {openLedger, positiveInteger};
+module.exports = {openLedger, positiveInteger, DEFAULT_MAX_RECORDS,
+  DEFAULT_MAX_LEDGER_BYTES};

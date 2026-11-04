@@ -48,8 +48,10 @@ spec:
                   key: base-url
             - name: BOT_LEDGER_DIR
               value: /data/ledger
+            # 팀 INSERT 워커의 forward_NNN·return_NNN 과 겹치지 않게 한다.
+            # ledger 를 잃었으면 새 run_id 로 시작한다(docs/deployment.md).
             - name: BOT_RUN_ID
-              value: forward_001
+              value: ghost_bot_forward_001
             - name: BOT_PHASE
               value: onprem_live
             - name: BOT_MAX_RECORDS
@@ -60,6 +62,13 @@ spec:
               value: '1'
             - name: BOT_METRICS_PORT
               value: '9091'
+            # 앱과 같은 Secret. 없으면 pod 가 뜨지 않는다(의도한 fail-closed).
+            # base-url 이 https 가 아니면 봇이 토큰 전송을 거절하고 종료한다.
+            - name: BOT_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: sample-app-api-token
+                  key: token
           ports:
             - name: metrics
               containerPort: 9091

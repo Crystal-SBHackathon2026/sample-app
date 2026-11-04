@@ -1,9 +1,11 @@
-const {Pool} = require('pg');
+const {Pool, defaults: driverDefaults} = require('pg');
 const {RequestStoreError, normalizeId, normalizeRequest} = require('./request');
 const {postgresOptionsFromEnv} = require('./config');
 
-const COLUMNS = 'request_id, run_id, phase, request_no::text, payload, created_at';
-const SELECT = `SELECT ${COLUMNS} FROM public.migration_demo WHERE request_id=$1`;
+const COLUMNS =
+    'request_id, run_id, phase, request_no::text, payload, created_at';
+const SELECT =
+    `SELECT ${COLUMNS} FROM public.migration_demo WHERE request_id=$1`;
 const INSERT = `INSERT INTO public.migration_demo
     (request_id, run_id, phase, request_no, payload, created_at)
     VALUES ($1,$2,$3,$4,$5,$6)
@@ -11,6 +13,54 @@ const INSERT = `INSERT INTO public.migration_demo
 
 function unavailable() {
   return new RequestStoreError('DB_UNAVAILABLE', 'Database is unavailable');
+}
+
+function invalidConfiguration(message) {
+  return new RequestStoreError('INVALID_CONFIGURATION', message, 500);
+}
+
+/** Mirrors pg 8, which reads PGSSLMODE then pg.defaults when ssl is omitted. */
+function driverDefaultSsl() {
+  const mode = process.env.PGSSLMODE;
+  if (mode === 'disable') return false;
+  if (['prefer', 'require', 'verify-ca', 'verify-full'].includes(mode)) {
+    return true;
+  }
+  if (mode === 'no-verify') return mode;
+  return driverDefaults.ssl ?? false;
+}
+
+/**
+ * Accepts only false, true or an object that keeps certificate and host
+ * verification on; pg turns strings such as 'no-verify' into unverified TLS.
+ */
+function assertVerifiedTls(ssl) {
+  const effective = ssl === undefined ? driverDefaultSsl() : ssl;
+  if (typeof effective === 'boolean') return;
+  const verifies = effective !== null && typeof effective === 'object' &&
+      !Array.isArray(effective) &&
+      (!('rejectUnauthorized' in effective) ||
+          effective.rejectUnauthorized === true) &&
+      !('checkServerIdentity' in effective);
+  if (!verifies) {
+    throw invalidConfiguration(
+        'TLS certificate verification must remain enabled');
+  }
+}
+
+function assertUrlWithoutSsl(connectionString) {
+  let url;
+  try {
+    url = new URL(connectionString);
+  } catch {
+    // URL errors keep the raw input, which may contain credentials.
+    throw invalidConfiguration('connectionString must be a PostgreSQL URL');
+  }
+  if (['sslmode', 'sslcert', 'sslkey', 'sslrootcert', 'ssl'].some(
+      (name) => url.searchParams.has(name))) {
+    throw invalidConfiguration(
+        'Use postgresOptionsFromEnv or explicit ssl options without URL SSL parameters');
+  }
 }
 
 function rowRecord(row) {
@@ -25,7 +75,10 @@ function createPostgresRequestStore(options = {}) {
   let closed = false;
   let closing = false;
   let closePromise;
+  // replacing blocks writes, resume and another swap until cleanup ends.
+  // swapPending additionally blocks reads until the validated pool is in use.
   let replacing = false;
+  let swapPending = false;
   const replacementWaiters = [];
   let inFlightWrites = 0;
   const drainWaiters = [];
@@ -44,20 +97,8 @@ function createPostgresRequestStore(options = {}) {
   function makePool(config) {
     const {statementTimeoutMillis = 5000, poolFactory: ignored,
       onObservation: callback, writesPaused: initial, ...rest} = config;
-    if (rest.connectionString) {
-      const url = new URL(rest.connectionString);
-      if (url.searchParams.has('sslmode') ||
-          ['sslcert', 'sslkey', 'sslrootcert', 'ssl'].some(
-              (name) => url.searchParams.has(name))) {
-        throw new RequestStoreError('INVALID_CONFIGURATION',
-            'Use postgresOptionsFromEnv or explicit ssl options without URL SSL parameters',
-            500);
-      }
-    }
-    if (rest.ssl && rest.ssl.rejectUnauthorized === false) {
-      throw new RequestStoreError('INVALID_CONFIGURATION',
-          'TLS certificate verification must remain enabled', 500);
-    }
+    if (rest.connectionString) assertUrlWithoutSsl(rest.connectionString);
+    assertVerifiedTls(rest.ssl);
     const created = poolFactory({
       max: 5, connectionTimeoutMillis: 3000, idleTimeoutMillis: 30000,
       keepAlive: true,
@@ -72,8 +113,23 @@ function createPostgresRequestStore(options = {}) {
 
   pool = makePool(options);
 
+  function ensureReadable() {
+    if (closed || closing || swapPending) throw unavailable();
+  }
+
   function ensureAvailable() {
-    if (closed || closing || replacing) throw unavailable();
+    ensureReadable();
+    if (replacing) throw unavailable();
+  }
+
+  async function endRetiredPool(retired) {
+    const started = process.hrtime.bigint();
+    try {
+      await retired.end();
+    } catch {
+      // The candidate already serves requests; a failed end is only observed.
+      observe('connection', 'error', started);
+    }
   }
 
   async function useClient(operation, action) {
@@ -81,7 +137,7 @@ function createPostgresRequestStore(options = {}) {
     let client;
     let discardError;
     try {
-      ensureAvailable();
+      ensureReadable();
       client = await pool.connect();
       const result = await action(client);
       observe(operation, 'success', started);
@@ -99,7 +155,9 @@ function createPostgresRequestStore(options = {}) {
   function finishWrite() {
     inFlightWrites--;
     if (inFlightWrites === 0) {
-      for (const resolve of drainWaiters.splice(0)) resolve();
+      for (const resolve of drainWaiters.splice(0)) {
+        resolve();
+      }
     }
   }
 
@@ -205,21 +263,27 @@ function createPostgresRequestStore(options = {}) {
             'Pause and drain writes before replacing the database', 409);
       }
       replacing = true;
+      swapPending = true;
       let candidate;
       try {
         await drainWrites();
         candidate = makePool(nextOptions);
         await candidate.query(`SELECT ${COLUMNS}
           FROM public.migration_demo LIMIT 0`);
-        await pool.end();
+        const retired = pool;
         pool = candidate;
         candidate = null;
+        swapPending = false;
+        await endRetiredPool(retired);
       } catch {
         throw unavailable();
       } finally {
         if (candidate) await candidate.end().catch(() => {});
+        swapPending = false;
         replacing = false;
-        for (const resolve of replacementWaiters.splice(0)) resolve();
+        for (const resolve of replacementWaiters.splice(0)) {
+          resolve();
+        }
       }
     },
 

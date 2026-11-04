@@ -12,13 +12,35 @@ function sendRequestError(res, error) {
   }});
 }
 
-/** Mount at any path; getContext adds application-specific response metadata. */
-function createRequestRouter({store, getContext = () => ({})}) {
+/**
+ * Returns the response metadata; bots require a non-empty environment.
+ * @param {function(): {environment: string}} getContext
+ * @return {{environment: string}}
+ */
+function readContext(getContext) {
+  const context = getContext();
+  if (!context || typeof context.environment !== 'string' ||
+      context.environment === '') {
+    throw new RequestStoreError('CONTEXT_INVALID',
+        'Response context is invalid', 500);
+  }
+  return context;
+}
+
+/**
+ * Mount at any path. getContext must return {environment: non-empty string}
+ * and may add other application-specific response metadata.
+ */
+function createRequestRouter({store, getContext}) {
+  if (typeof getContext !== 'function') {
+    throw new TypeError('getContext must be a function');
+  }
   const router = express.Router();
   router.use(express.json({limit: '512kb'}));
   router.post('/', async (req, res) => {
     try {
-      const context = getContext();
+      // Validate before put so an invalid context never follows a commit.
+      const context = readContext(getContext);
       const result = await store.put(req.body);
       res.status(result.created ? 201 : 200).json({
         ...context, ...result, status: 'committed',
@@ -29,13 +51,14 @@ function createRequestRouter({store, getContext = () => ({})}) {
   });
   router.get('/:id', async (req, res) => {
     try {
+      const context = readContext(getContext);
       const result = await store.get(req.params.id);
       if (!result.request) {
         return res.status(404).json({error: {
           code: 'REQUEST_NOT_FOUND', message: 'Request was not found',
         }});
       }
-      res.json({...getContext(), ...result, status: 'committed'});
+      res.json({...context, ...result, status: 'committed'});
     } catch (error) {
       sendRequestError(res, error);
     }

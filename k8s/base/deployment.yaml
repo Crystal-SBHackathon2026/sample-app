@@ -41,6 +41,15 @@ spec:
               value: '0'
             - name: APP_CONTROL_FILE
               value: /app-control/control.json
+            # Secret 이 없으면 pod 는 뜨고 /api/requests 만 503 으로 닫힌다.
+            - name: REQUEST_API_AUTH
+              value: required
+            - name: REQUEST_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: sample-app-api-token
+                  key: token
+                  optional: true
           volumeMounts:
             - name: control
               mountPath: /app-control

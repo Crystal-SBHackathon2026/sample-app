@@ -65,6 +65,10 @@ function normalizeRequest(input) {
         value.length) > max || (field !== 'payload' && value.length === 0)) {
       throw invalid(`${field} exceeds the documented string size limit`);
     }
+    // PostgreSQL UTF-8 would store a lone surrogate as U+FFFD.
+    if (!value.isWellFormed()) {
+      throw invalid(`${field} must be well-formed Unicode text`);
+    }
     result[field] = value;
   }
   const no = input.request_no;

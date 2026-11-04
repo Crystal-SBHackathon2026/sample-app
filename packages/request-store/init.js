@@ -6,7 +6,9 @@ const {postgresOptionsFromEnv} = require('./config');
 
 async function initializeSchema() {
   const {statementTimeoutMillis, ...options} = postgresOptionsFromEnv();
-  const pool = new Pool({...options, statement_timeout: statementTimeoutMillis});
+  const pool = new Pool({
+    ...options, statement_timeout: statementTimeoutMillis,
+  });
   pool.on('error', () => {});
   try {
     await pool.query(readFileSync(join(__dirname, 'schema.sql'), 'utf8'));
