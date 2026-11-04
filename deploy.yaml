@@ -26,7 +26,6 @@ runtime:
   env:
     DEPLOY_ENV: aws
     DEPLOY_REGION: ap-northeast-2
-    FAIL_RATE: '0.3'
 network:
   ingress:
     public: true
