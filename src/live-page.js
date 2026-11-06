@@ -144,6 +144,110 @@ function createIngestTracker() {
   };
 }
 
+/**
+ * Tells what versions are answering: one, or a canary mix. A plain replacement
+ * flips once and stays, so it never counts as a mix; only versions alternating
+ * within the window do. A new version must answer a few times in a row first,
+ * or the first canary answer would read as a finished replacement.
+ */
+function createVersionTracker() {
+  const WINDOW_MILLIS = 10000;
+  const CHANGE_NOTICE_MILLIS = 3000;
+  const ANSWERS_TO_CONFIRM = 4;
+  const RETAINED_MARKS = 20;
+  let answers = [];
+  let current = null;
+  let change = null;
+  const marks = [];
+
+  const flips = () => answers.filter((answer, index) =>
+    index > 0 && answer.version !== answers[index - 1].version).length;
+
+  function trailingRun() {
+    const newest = answers[answers.length - 1].version;
+    let run = 0;
+    for (let i = answers.length - 1; i >= 0; i--) {
+      if (answers[i].version !== newest) break;
+      run++;
+    }
+    return run;
+  }
+
+  return {
+    record(version, atMs) {
+      answers.push({version, atMs});
+      answers = answers.filter((answer) => atMs - answer.atMs < WINDOW_MILLIS);
+      const settled = flips() === 0 ||
+          (flips() === 1 && trailingRun() >= ANSWERS_TO_CONFIRM);
+      if (!settled || version === current) return;
+      if (current !== null) {
+        change = {from: current, to: version, atMs};
+        marks.push({version, atMs});
+        marks.splice(0, Math.max(0, marks.length - RETAINED_MARKS));
+      }
+      current = version;
+    },
+    /** Starts over for another deployment; its version is not a change. */
+    reset() {
+      answers = [];
+      current = null;
+      change = null;
+    },
+    /** Versions to show with their share of recent answers, largest first. */
+    shares() {
+      if (flips() < 2) return current ? [{version: current, percent: 100}] : [];
+      const counts = new Map();
+      for (const {version} of answers) {
+        counts.set(version, (counts.get(version) || 0) + 1);
+      }
+      return [...counts]
+          .sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1))
+          .map(([version, count]) => ({
+            version, percent: Math.round(count * 100 / answers.length),
+          }));
+    },
+    /** The change to announce right now, or null. */
+    recentChange(nowMs) {
+      return change && nowMs - change.atMs < CHANGE_NOTICE_MILLIS ?
+          change : null;
+    },
+    marks() { return marks; },
+  };
+}
+
+/**
+ * Picks a version's color from its hash alone, so one version looks the same
+ * on every screen. None is close to an environment color.
+ */
+function versionColor(version) {
+  const COLORS = [
+    '#c084fc', '#f472b6', '#a3e635', '#fde047', '#f5f5f4', '#c4a484',
+  ];
+  let hash = 2166136261;
+  for (let index = 0; index < version.length; index++) {
+    hash = Math.imul(hash ^ version.charCodeAt(index), 16777619) >>> 0;
+  }
+  return COLORS[hash % COLORS.length];
+}
+
+/** Splits chart bars into runs of one environment; a gap ends a run too. */
+function splitChartSegments(bars) {
+  const segments = [];
+  let open = null;
+  bars.forEach((bar, index) => {
+    if (!bar) {
+      open = null;
+      return;
+    }
+    if (!open || open.environment !== bar.environment) {
+      open = {environment: bar.environment, firstIndex: index, rates: []};
+      segments.push(open);
+    }
+    open.rates.push(bar.rate);
+  });
+  return segments;
+}
+
 function runDashboard() {
   const POLL_MILLIS = 1000;
   const POLL_TIMEOUT_MILLIS = 3000;
@@ -152,17 +256,16 @@ function runDashboard() {
   const CHART_SECONDS = 60;
   // Samples arrive up to two seconds late; keep them off the chart's edge.
   const CHART_LAG_SECONDS = 2;
+  const CHART_WIDTH = 600;
   const CHART_HEIGHT = 120;
-  const BAR_STEP = 10;
-  const BAR_WIDTH = 8;
-  // An observed zero keeps a sliver, so it never reads as an unobserved gap.
-  const MIN_BAR_HEIGHT = 3;
+  const CHART_TOP_MARGIN = 4;
   const SVG_NAMESPACE = 'http://www.w3.org/2000/svg';
   const FULL_COMMIT_CHARACTERS = 40;
   const SHORT_COMMIT_CHARACTERS = 7;
 
   const element = (id) => document.getElementById(id);
   const tracker = createIngestTracker();
+  const versions = createVersionTracker();
   const rowsById = new Map();
   let serverClockOffsetMs = -Infinity;
   let lastAnswerMs = Date.now();
@@ -170,6 +273,12 @@ function runDashboard() {
   let appAnswering = null;
   let databaseAnswering = true;
   let shownEnvironment = null;
+  let writesPaused = false;
+  let shownShares = '';
+
+  const shortVersion = (version) => (
+    version.length === FULL_COMMIT_CHARACTERS ?
+    version.slice(0, SHORT_COMMIT_CHARACTERS) : version);
 
   const serverNowMs = () => Date.now() +
       (serverClockOffsetMs === -Infinity ? 0 : serverClockOffsetMs);
@@ -178,10 +287,35 @@ function runDashboard() {
     document.body.dataset.environment = live.environment;
     element('environment').textContent = live.environment;
     element('region').textContent = live.region;
-    element('version').textContent =
-        live.version.length === FULL_COMMIT_CHARACTERS ?
-        live.version.slice(0, SHORT_COMMIT_CHARACTERS) : live.version;
+    if (live.environment !== shownEnvironment) versions.reset();
+    versions.record(live.version, Date.now());
+    writesPaused = live.writes_paused;
     element('banner').hidden = !live.writes_paused;
+  }
+
+  function createVersionChip({version, percent}) {
+    const chip = document.createElement('span');
+    chip.className = 'version-chip';
+    chip.style.background = versionColor(version);
+    chip.textContent = percent === 100 ? shortVersion(version) :
+        `${shortVersion(version)} ${percent}%`;
+    return chip;
+  }
+
+  function renderVersion() {
+    const shares = versions.shares();
+    const key = JSON.stringify(shares);
+    if (shares.length > 0 && key !== shownShares) {
+      shownShares = key;
+      element('version').replaceChildren(...shares.map(createVersionChip));
+    }
+    const change = versions.recentChange(Date.now());
+    element('version').classList.toggle('changed', change !== null);
+    element('version-notice').hidden = change === null;
+    if (change) {
+      element('version-notice').textContent =
+          `버전 변경 ${shortVersion(change.from)} → ${shortVersion(change.to)}`;
+    }
   }
 
   function createRow(row) {
@@ -284,20 +418,64 @@ function runDashboard() {
     setTimeout(poll, Math.max(0, POLL_MILLIS - (Date.now() - startedMs)));
   }
 
+  function createChartPath(className, path) {
+    const shape = document.createElementNS(SVG_NAMESPACE, 'path');
+    shape.setAttribute('class', className);
+    shape.setAttribute('d', path);
+    return shape;
+  }
+
+  /** Draws one environment's run as a line over a filled area. */
+  function createChartSegment({environment, firstIndex, rates}, largest) {
+    const step = CHART_WIDTH / (CHART_SECONDS - 1);
+    const xAt = (offset) => (firstIndex + offset) * step;
+    const yAt = (rate) => CHART_HEIGHT -
+        rate / largest * (CHART_HEIGHT - CHART_TOP_MARGIN);
+    let line = rates.map((rate, offset) =>
+      `${offset === 0 ? 'M' : 'L'}${xAt(offset)} ${yAt(rate)}`).join('');
+    // A lone observed second still needs width to be visible.
+    if (rates.length === 1) line += `h${step}`;
+    const endX = xAt(Math.max(1, rates.length - 1));
+    const area = `${line}L${endX} ${CHART_HEIGHT}` +
+        `L${xAt(0)} ${CHART_HEIGHT}Z`;
+    const group = document.createElementNS(SVG_NAMESPACE, 'g');
+    group.setAttribute('data-environment', environment);
+    group.append(createChartPath('chart-area', area),
+        createChartPath('chart-line', line));
+    return group;
+  }
+
+  /** Draws a vertical line at each version change still on the chart. */
+  function renderVersionMarks(endSecond) {
+    const step = CHART_WIDTH / (CHART_SECONDS - 1);
+    const offsetMs = serverNowMs() - Date.now();
+    const lines = [];
+    for (const {version, atMs} of versions.marks()) {
+      const second = Math.floor((atMs + offsetMs) / 1000);
+      const index = second - (endSecond - CHART_SECONDS + 1);
+      if (index < 0 || index >= CHART_SECONDS) continue;
+      const line = document.createElementNS(SVG_NAMESPACE, 'line');
+      line.setAttribute('class', 'version-mark');
+      line.setAttribute('x1', index * step);
+      line.setAttribute('x2', index * step);
+      line.setAttribute('y1', 0);
+      line.setAttribute('y2', CHART_HEIGHT);
+      line.setAttribute('stroke', versionColor(version));
+      lines.push(line);
+    }
+    element('sparkline-marks').replaceChildren(...lines);
+  }
+
   function renderChart(nowSecond) {
     const endSecond = nowSecond - CHART_LAG_SECONDS;
     const bars = tracker.bars(endSecond, CHART_SECONDS);
     const rates = bars.filter(Boolean).map((bar) => bar.rate);
-    // The axis fits every bar shown; its floor keeps a trickle from filling it.
+    // The axis fits all it shows; its floor keeps a trickle from filling it.
     const largest = Math.max(1, ...rates);
-    const shapes = element('sparkline-bars').children;
-    bars.forEach((bar, index) => {
-      const height = bar ? Math.max(MIN_BAR_HEIGHT,
-          bar.rate / largest * (CHART_HEIGHT - MIN_BAR_HEIGHT)) : 0;
-      shapes[index].setAttribute('height', height);
-      shapes[index].setAttribute('y', CHART_HEIGHT - height);
-      if (bar) shapes[index].setAttribute('data-environment', bar.environment);
-    });
+    element('sparkline-segments').replaceChildren(
+        ...splitChartSegments(bars).map((segment) =>
+          createChartSegment(segment, largest)));
+    renderVersionMarks(endSecond);
     const peak = tracker.peakRate(endSecond, CHART_SECONDS);
     element('sparkline-peak').textContent = peak === null ? '' :
         `최대 ${peak.toFixed(peak < 10 ? 1 : 0)}/초`;
@@ -321,24 +499,24 @@ function runDashboard() {
   function render() {
     const nowMs = serverNowMs();
     const nowSecond = Math.floor(nowMs / 1000);
-    // Nothing is being measured during an outage, so no rate is claimed.
-    const measuring = appAnswering !== false && databaseAnswering;
-    const rate = measuring ?
-        tracker.averageRate(nowSecond, RATE_WINDOW_SECONDS) : null;
-    element('rate').textContent = rate === null ? '—' : rate.toFixed(1);
+    if (appAnswering !== false && writesPaused) {
+      // The banner says writes stopped; a fading average would contradict it.
+      element('rate').textContent = '0.0';
+    } else {
+      // Nothing is being measured during an outage, so no rate is claimed.
+      const measuring = appAnswering !== false && databaseAnswering;
+      const rate = measuring ?
+          tracker.averageRate(nowSecond, RATE_WINDOW_SECONDS) : null;
+      element('rate').textContent = rate === null ? '—' : rate.toFixed(1);
+    }
     const lastWrite = tracker.lastWriteMs();
     element('last-write').textContent = lastWrite === null ? '—' :
         String(Math.max(0, Math.floor((nowMs - lastWrite) / 1000)));
     renderChart(nowSecond);
+    renderVersion();
     renderStatus(Date.now());
   }
 
-  for (let index = 0; index < CHART_SECONDS; index++) {
-    const bar = document.createElementNS(SVG_NAMESPACE, 'rect');
-    bar.setAttribute('x', index * BAR_STEP);
-    bar.setAttribute('width', BAR_WIDTH);
-    element('sparkline-bars').append(bar);
-  }
   poll();
   render();
   setInterval(render, RENDER_MILLIS);
@@ -405,7 +583,25 @@ main {
 #chart { flex: 1; display: flex; flex-direction: column; min-height: 160px; }
 #chart-heading { display: flex; justify-content: space-between; }
 #chart svg { flex: 1; width: 100%; min-height: 0; margin-top: .4em; }
-rect { --environment: #9aa7b4; fill: var(--environment); }
+g { --environment: #9aa7b4; }
+.chart-area { fill: var(--environment); fill-opacity: .18; }
+.chart-line {
+  fill: none; stroke: var(--environment); stroke-width: 2;
+  stroke-linejoin: round; vector-effect: non-scaling-stroke;
+}
+.version-mark {
+  stroke-width: 2; stroke-dasharray: 4 3; vector-effect: non-scaling-stroke;
+}
+#version { display: inline-flex; flex-wrap: wrap; gap: .3em; }
+.version-chip {
+  padding: 0 .4em; border-radius: 4px; color: #0b0f14; font-weight: 800;
+}
+#version.changed { outline: .15em solid var(--text); border-radius: 6px; }
+#version-notice {
+  padding: .2em 1em; border-radius: 8px; background: var(--panel);
+  border: 1px solid var(--text); font-size: clamp(18px, 2vw, 48px);
+  font-weight: 800; text-align: center;
+}
 #sparkline-baseline {
   stroke: var(--line); stroke-width: 1; vector-effect: non-scaling-stroke;
 }
@@ -449,6 +645,7 @@ function renderLivePage({appInfo, databaseText}) {
 <title>Ghost Migration Demo</title><style>${STYLE}</style></head>
 <body data-environment="${escapeHtml(appInfo.environment)}">
   <div id="banner" role="status" hidden>⚠ 전환 중 · 쓰기 일시 정지</div>
+  <div id="version-notice" role="status" hidden></div>
   <header>
     <h1 id="environment">${escapeHtml(appInfo.environment)}</h1>
     <div id="identity">
@@ -477,7 +674,7 @@ function renderLivePage({appInfo, databaseText}) {
         <svg viewBox="0 0 600 120" preserveAspectRatio="none" role="img"
             aria-label="최근 60초 초당 유입량. 끊긴 구간은 비어 있음">
           <line id="sparkline-baseline" x1="0" y1="120" x2="600" y2="120"/>
-          <g id="sparkline-bars"></g>
+          <g id="sparkline-segments"></g><g id="sparkline-marks"></g>
         </svg>
       </div>
     </div>
@@ -488,10 +685,16 @@ function renderLivePage({appInfo, databaseText}) {
   </main>
   <script type="module">
 ${createIngestTracker}
+${createVersionTracker}
+${versionColor}
+${splitChartSegments}
 ${runDashboard}
 runDashboard();
   </script>
 </body></html>`;
 }
 
-module.exports = {createIngestTracker, renderLivePage};
+module.exports = {
+  createIngestTracker, createVersionTracker, renderLivePage, splitChartSegments,
+  versionColor,
+};
