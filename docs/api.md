@@ -30,6 +30,12 @@ created_at은 timezone이 있는 ISO 8601이며 밀리초 정밀도로 정규화
 - 모든 오류: {error:{code:string,message:string}}. 내부 DB 오류는 노출하지 않는다.
 - GET /api/info: 환경 정보 + database:{name,row_count:string}, writes_paused,
   writes_in_flight, write_control:{healthy:boolean}.
+- GET /api/live: 대시보드용 읽기 전용, 인증 없음. environment, region, version,
+  database:{name,row_count:string}, recent[최신 20건:{request_id_prefix(8자),
+  run_id,phase,created_at}], writes_paused, observed_at. payload는 내보내지 않는다.
+  DB 장애·DB 미설정은 503 DB_UNAVAILABLE에 database:null, recent:[]. DB 읽기는
+  1초 캐시(장애 포함)하고 최대 2초 기다린다. writes_paused는 요청마다 읽는다.
+  http_requests_total과 지연 지표에서 제외한다.
 - GET /readyz: DB 접속 및 테이블 조회 가능하고 종료 drain 중이 아닐 때 200,
   아니면 503. 제어 파일 상태는 readiness에 영향을 주지 않는다.
 - GET /healthz: DB와 독립된 liveness.
@@ -44,7 +50,7 @@ created_at은 timezone이 있는 ISO 8601이며 밀리초 정밀도로 정규화
 샘플 앱은 `/api/requests` 아래 모든 경로와 method(POST, GET `/:id`, HEAD 등)
 앞에 인증 guard를 둔다. guard는 제어 파일 확인, JSON 본문 해석, DB보다 먼저
 응답한다. 경로 대소문자나 끝 `/`로 우회할 수 없다. `/`, `/healthz`,
-`/readyz`, `/api/info`, `/metrics`에는 적용하지 않는다.
+`/readyz`, `/api/info`, `/api/live`, `/metrics`에는 적용하지 않는다.
 
 모드는 시작할 때 한 번 정한다. 아래 표의 "미정의"는 환경변수 키가 아예 없는
 상태이고 빈 값(`""`)과 다르다. K8s Secret 참조가 `optional: true`인데
@@ -110,6 +116,8 @@ statementTimeoutMillis,max,...})를 제공한다.
 - put(record): Promise<{created,request,database:{name}}>
 - get(id): Promise<{request:record|null,database:{name}}>
 - status(): Promise<{name,row_count}>
+- liveSnapshot(limit): Promise<{name,row_count,recent:[{request_id,run_id,phase,
+  created_at}]}>, created_at 내림차순. payload·request_no는 읽지 않는다.
 - pauseWrites(): Promise<void>, 새 쓰기 차단 후 진행 중 쓰기 drain
 - resumeWrites(): void
 - writesPaused: boolean getter

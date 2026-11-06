@@ -90,7 +90,7 @@ review-service 카탈로그를 바꿔야 하며 이 작업의 범위 밖이다.
 ## 요청 API 인증
 
 `/api/requests`의 POST와 GET은 공유 Bearer 토큰으로 보호한다. 화면 `/`,
-`/healthz`, `/readyz`, `/api/info`, `/metrics`는 인증 없이 열려 있다. 응답과
+`/healthz`, `/readyz`, `/api/info`, `/api/live`, `/metrics`는 인증 없이 열려 있다. 응답과
 모드 판정은 [API 계약](api.md)에 있다.
 
 | 대상 | `REQUEST_API_AUTH` | 토큰 env |
@@ -235,8 +235,9 @@ curl -sS -o /dev/null -w '%{http_code}\n' -H @/secure/api-auth-header \
 
 ### 인증이 닫지 않는 위험
 
-- 공개 `/readyz`는 요청마다 제어 파일과 DB pool을 쓴다. `/api/info`와 `/`도
-  제어 파일과 1초 캐시 조회를 쓴다. L7 flood로 pool 경합과 readiness 실패가
+- 공개 `/readyz`는 요청마다 제어 파일과 DB pool을 쓴다. `/api/info`, `/api/live`,
+  `/`도 제어 파일과 1초 캐시 조회를 쓴다. `/api/live`는 최근 20건의 `run_id`,
+  `phase`, `created_at`, ID 앞 8자를 익명에게 보여 준다. L7 flood로 pool 경합과 readiness 실패가
   여전히 가능하다. 속도 제한과 WAF는 외부 edge의 책임이다.
 - TLS는 ALB에서 끝난다. ALB에서 Pod까지와 클러스터 안 프록시 구간은 평문이다.
 - 고정 공유 토큰이라 만료, scope, audience가 없다. 유출되면 교체할 때까지 같은

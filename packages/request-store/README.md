@@ -71,6 +71,8 @@ const ready = await store.checkReady();
 // {name: 'migration_demo'}; checks table columns without counting rows
 const status = await store.status();
 // {name: 'migration_demo', row_count: '1'}
+const live = await store.liveSnapshot(20);
+// status fields + recent: newest rows' {request_id, run_id, phase, created_at}
 ```
 
 동일 UUID와 동일한 모든 필드는 기존 커밋을 반환한다(`created: false`).
