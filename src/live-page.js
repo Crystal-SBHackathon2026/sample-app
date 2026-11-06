@@ -32,6 +32,7 @@ function createIngestTracker() {
   let highestCount = 0;
   let lastObservedMs = 0;
   let lastWriteMs = null;
+  let baselineSecond = 0;
 
   function startBaseline(sample) {
     identity = sample.identity;
@@ -39,6 +40,12 @@ function createIngestTracker() {
     lastObservedMs = sample.observedAtMs;
     lastWriteMs = sample.newestCreatedAtMs === null ? null :
         Math.min(sample.newestCreatedAtMs, sample.observedAtMs);
+    // Seconds from here on may hold rows of the previous deployment, whose
+    // clock can run ahead of this one.
+    baselineSecond = Math.floor(sample.observedAtMs / 1000);
+    for (const second of observedBySecond.keys()) {
+      if (second >= baselineSecond) observedBySecond.delete(second);
+    }
   }
 
   /**
@@ -102,9 +109,15 @@ function createIngestTracker() {
       return buckets(endSecond, count).map((bucket) =>
         bucket ? bucket.rows * 1000 / bucket.millis : null);
     },
-    /** Rows per second over observed time only; null when nothing observed. */
+    /**
+     * Rows per second over observed time since the last baseline, so a number
+     * from the previous deployment never shows under the new one. Null when
+     * nothing was observed.
+     */
     averageRate(endSecond, seconds) {
-      const observed = buckets(endSecond, seconds).filter(Boolean);
+      const sinceBaseline = endSecond - baselineSecond + 1;
+      const window = Math.max(0, Math.min(seconds, sinceBaseline));
+      const observed = buckets(endSecond, window).filter(Boolean);
       if (observed.length === 0) return null;
       const rows = observed.reduce((sum, bucket) => sum + bucket.rows, 0);
       const millis = observed.reduce((sum, bucket) => sum + bucket.millis, 0);

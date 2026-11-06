@@ -99,6 +99,32 @@ test('a database rebuilt under the same name is a new baseline', () => {
   assert.equal(tracker.highestCount(), 3);
 });
 
+test('the average never reaches back across a new baseline', () => {
+  const tracker = createIngestTracker();
+  sample(tracker, 100, 1000);
+  sample(tracker, 110, 1001);
+  sample(tracker, 5000, 1001.5, 'gcp/demo_gcp');
+  assert.equal(tracker.averageRate(1001, 10), null);
+  sample(tracker, 5002, 1002.5, 'gcp/demo_gcp');
+  assert.equal(tracker.averageRate(1002, 10), 2);
+  // The chart keeps the previous environment's seconds on purpose.
+  assert.equal(tracker.series(1000, 1)[0], 10);
+});
+
+test('a new environment with a slower clock inherits no previous seconds',
+    () => {
+      const tracker = createIngestTracker();
+      sample(tracker, 100, 1000);
+      sample(tracker, 200, 1001);
+      sample(tracker, 300, 1002);
+      // gcp's clock runs 1.5 s behind, so its baseline predates aws's last rows.
+      sample(tracker, 5000, 1000.5, 'gcp/demo_gcp');
+      assert.equal(tracker.averageRate(1002, 10), null);
+      sample(tracker, 5000, 1001.5, 'gcp/demo_gcp');
+      sample(tracker, 5000, 1002.5, 'gcp/demo_gcp');
+      assert.equal(tracker.averageRate(1002, 10), 0);
+    });
+
 test('only a fall of more than 10% counts as a rebuilt database', () => {
   const tracker = createIngestTracker();
   const next = (rowCount, seconds) => tracker.record({identity: IDENTITY,
@@ -398,6 +424,37 @@ test('an older answer from another replica does not rewind the list',
       assert.equal(screen.element('rows').children[0].children[0].textContent,
           'bbbbbbbb');
     });
+
+test('aws to gcp leaves no aws number on the gcp screen', async () => {
+  const now = Date.now();
+  const at = (ms) => new Date(now + ms).toISOString();
+  const aws = (rows, ms) => liveBody({environment: 'aws', observed_at: at(ms),
+    database: {name: 'demo_aws', row_count: String(rows)}});
+  const gcpRow = {request_id_prefix: 'cccccccc', run_id: 'gcp_seed',
+    phase: 'gcp_live', created_at: at(-60000)};
+  const screen = openDashboard([
+    {status: 200, body: aws(170000, -3000)},
+    {status: 200, body: aws(170010, -2000)},
+    {status: 200, body: aws(170020, -1000)},
+    {status: 200, body: liveBody({environment: 'gcp', observed_at: at(0),
+      database: {name: 'demo_gcp', row_count: '5000'}, recent: [gcpRow]})},
+  ]);
+  await screen.poll();
+  await screen.pollAgain();
+  await screen.pollAgain();
+  assert.equal(screen.element('rate').textContent, '10.0');
+  await screen.pollAgain();
+  assert.equal(screen.element('environment').textContent, 'gcp');
+  assert.equal(screen.element('body').dataset.environment, 'gcp');
+  assert.equal(screen.element('database').textContent, 'demo_gcp');
+  assert.equal(screen.element('total').textContent, '5,000');
+  assert.equal(screen.element('rate').textContent, '—');
+  assert.ok(Number(screen.element('last-write').textContent) >= 59);
+  const rows = screen.element('rows').children;
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].children[1].textContent, 'gcp_seed');
+  assert.equal(rows[0].classList.contains('fresh'), false);
+});
 
 test('replicas out of step never make the total go backwards', async () => {
   const later = (ms) => new Date(Date.now() + ms).toISOString();
