@@ -1,7 +1,10 @@
 const {test} = require('node:test');
 const assert = require('node:assert/strict');
 const vm = require('node:vm');
-const {createIngestTracker, renderLivePage} = require('../src/live-page');
+const {
+  createIngestTracker, createVersionTracker, renderLivePage, splitChartSegments,
+  versionColor,
+} = require('../src/live-page');
 
 const IDENTITY = 'aws/demo';
 
@@ -253,6 +256,8 @@ function fakeElement() {
   const classes = new Set();
   return {
     textContent: '', hidden: false, dataset: {}, children: [], title: '',
+    style: {},
+    replaceChildren(...children) { this.children = children; },
     classList: {
       add: (name) => classes.add(name),
       remove: (name) => classes.delete(name),
@@ -264,7 +269,7 @@ function fakeElement() {
       this.attributes = {...this.attributes, [name]: String(value)};
     },
     addEventListener() {},
-    append(child) { this.children.push(child); },
+    append(...children) { this.children.push(...children); },
     insertBefore(child, before) {
       if (child.parent) child.remove();
       const at = before ? this.children.indexOf(before) : this.children.length;
@@ -338,7 +343,8 @@ test('the inline script paints a live answer using browser globals only',
       await screen.poll();
       assert.equal(screen.element('environment').textContent, 'onprem');
       assert.equal(screen.element('body').dataset.environment, 'onprem');
-      assert.equal(screen.element('version').textContent, 'aaaaaaa');
+      assert.equal(screen.element('version').children[0].textContent,
+          'aaaaaaa');
       assert.equal(screen.element('total').textContent, '1,000');
       assert.equal(screen.element('status').textContent, '실시간');
       assert.equal(screen.element('banner').hidden, true);
@@ -436,11 +442,10 @@ test('a new environment without a DB keeps the bars of the old one',
       ]);
       await screen.poll();
       for (let poll = 0; poll < 4; poll++) await screen.pollAgain();
-      const shown = screen.element('sparkline-bars').children
-          .filter((bar) => bar.attributes.height !== '0');
-      assert.ok(shown.length >= 1);
-      assert.ok(shown.every((bar) =>
-        bar.attributes['data-environment'] === 'aws'));
+      const segments = screen.element('sparkline-segments').children;
+      assert.ok(segments.length >= 1);
+      assert.ok(segments.every((segment) =>
+        segment.attributes['data-environment'] === 'aws'));
       assert.equal(screen.element('rate').textContent, '—');
       assert.equal(screen.element('sparkline-peak').textContent, '');
     });
@@ -450,9 +455,9 @@ test('environment colors beat the default bar color', () => {
     appInfo: {environment: 'e', region: 'r', version: 'v'}, databaseText: 'd',
   });
   // A selector with a class or id would outrank [data-environment] and gray out
-  // every bar.
-  assert.match(page, /^rect \{ --environment:/m);
-  assert.doesNotMatch(page, /[.#][\w-]+ rect \{/);
+  // every segment.
+  assert.match(page, /^g \{ --environment:/m);
+  assert.doesNotMatch(page, /[.#][\w-]+ g \{/);
 });
 
 test('status stays connecting until the first answer', async () => {
@@ -566,18 +571,12 @@ test('bars are colored by their own environment, gaps stay empty',
   ]);
   await screen.poll();
   for (let poll = 0; poll < 7; poll++) await screen.pollAgain();
-  const bars = screen.element('sparkline-bars').children;
-  assert.equal(bars.length, 60);
-  const shown = bars.filter((bar) => bar.attributes.height !== '0');
-  const environments = shown.map((bar) => bar.attributes['data-environment']);
-  assert.equal(environments[0], 'aws');
-  const firstGcp = environments.indexOf('gcp');
-  assert.ok(firstGcp > 0);
-  assert.ok(environments.slice(firstGcp).every((name) => name === 'gcp'));
-  // The silent seconds between the two environments stay empty.
-  const lastAws = shown[firstGcp - 1];
-  assert.ok(Number(lastAws.attributes.x) + 20 <
-      Number(shown[firstGcp].attributes.x));
+  const segments = screen.element('sparkline-segments').children;
+  assert.deepEqual(segments.map((one) => one.attributes['data-environment']),
+      ['aws', 'gcp']);
+  // Each environment gets its own filled area and line, so a gap stays empty.
+  assert.deepEqual(segments[0].children.map((path) => path.attributes.class),
+      ['chart-area', 'chart-line']);
   assert.equal(screen.element('sparkline-peak').textContent, '최대 3.0/초');
 });
 
@@ -593,10 +592,9 @@ test('an observed zero stays visible, unlike an unobserved second',
   ]);
   await screen.poll();
   for (let poll = 0; poll < 3; poll++) await screen.pollAgain();
-  const shown = screen.element('sparkline-bars').children
-      .filter((bar) => bar.attributes.height !== '0');
-  assert.ok(shown.length >= 1);
-  assert.ok(shown.every((bar) => Number(bar.attributes.height) > 0));
+  const [segment] = screen.element('sparkline-segments').children;
+  // A line along the bottom of the chart, unlike an unobserved second.
+  assert.match(segment.children[1].attributes.d, / 120/);
 });
 
 test('replicas out of step never make the total go backwards', async () => {
@@ -610,4 +608,109 @@ test('replicas out of step never make the total go backwards', async () => {
   await screen.poll();
   await screen.pollAgain();
   assert.equal(screen.element('total').textContent, '105');
+});
+
+const versionAnswers = (tracker, versions, startMs = 0) => {
+  versions.forEach((version, index) => {
+    tracker.record(version, startMs + index * 1000);
+  });
+};
+
+test('a plain replacement switches once and is never called a mix', () => {
+  const tracker = createVersionTracker();
+  versionAnswers(tracker, ['a', 'a', 'b', 'b', 'b']);
+  // Held back until confirmed: this could still be the first canary answer.
+  assert.deepEqual(tracker.shares(), [{version: 'a', percent: 100}]);
+  tracker.record('b', 5000);
+  assert.deepEqual(tracker.shares(), [{version: 'b', percent: 100}]);
+  assert.deepEqual(tracker.recentChange(5000),
+      {from: 'a', to: 'b', atMs: 5000});
+  assert.equal(tracker.recentChange(8000), null);
+  assert.equal(tracker.marks().length, 1);
+});
+
+test('alternating versions show shares, then one version once it is alone',
+    () => {
+      const tracker = createVersionTracker();
+      versionAnswers(tracker, ['a', 'b', 'a', 'b', 'a', 'b']);
+      assert.deepEqual(tracker.shares(), [
+        {version: 'a', percent: 50}, {version: 'b', percent: 50},
+      ]);
+      assert.equal(tracker.marks().length, 0);
+      versionAnswers(tracker, new Array(11).fill('b'), 6000);
+      assert.deepEqual(tracker.shares(), [{version: 'b', percent: 100}]);
+      assert.deepEqual(tracker.marks().map((mark) => mark.version), ['b']);
+    });
+
+test('another deployment starts over instead of announcing a change', () => {
+  const tracker = createVersionTracker();
+  versionAnswers(tracker, ['a', 'a']);
+  tracker.reset();
+  tracker.record('b', 2000);
+  assert.deepEqual(tracker.shares(), [{version: 'b', percent: 100}]);
+  assert.equal(tracker.recentChange(2000), null);
+});
+
+test('a version keeps its color and never takes an environment color', () => {
+  // Pinned: the demo viewer copies this function and must agree with it.
+  assert.equal(versionColor('d697a40'), '#a3e635');
+  assert.equal(versionColor('a1b2c3d'), '#f472b6');
+  const environmentColors = ['#2dd4bf', '#ff9900', '#60a5fa', '#9aa7b4'];
+  for (let index = 0; index < 200; index++) {
+    assert.ok(!environmentColors.includes(versionColor(`v${index}`)));
+  }
+});
+
+test('chart segments end at a gap and at a change of environment', () => {
+  const bar = (environment, rate) => ({environment, rate});
+  assert.deepEqual(splitChartSegments([
+    null, bar('aws', 1), bar('aws', 2), null, bar('gcp', 3), bar('aws', 4),
+  ]), [
+    {environment: 'aws', firstIndex: 1, rates: [1, 2]},
+    {environment: 'gcp', firstIndex: 4, rates: [3]},
+    {environment: 'aws', firstIndex: 5, rates: [4]},
+  ]);
+});
+
+test('the rate falls to 0.0 at once while the pause banner is up', async () => {
+  const now = Date.now();
+  const at = (ms) => new Date(now + ms).toISOString();
+  const body = (rows, ms, paused) => liveBody({observed_at: at(ms),
+    writes_paused: paused, database: {name: 'db', row_count: String(rows)}});
+  const screen = openDashboard([
+    {status: 200, body: body(100, -1000, false)},
+    {status: 200, body: body(110, 0, false)},
+    {status: 200, body: body(110, 500, true)},
+  ]);
+  await screen.poll();
+  await screen.pollAgain();
+  assert.equal(screen.element('rate').textContent, '10.0');
+  await screen.pollAgain();
+  assert.equal(screen.element('banner').hidden, false);
+  assert.equal(screen.element('rate').textContent, '0.0');
+});
+
+test('a version change raises the notice and marks the chart', async () => {
+  const answer = (version) => ({status: 200, body: liveBody({version})});
+  const screen = openDashboard([
+    answer('old'), answer('new'), answer('new'), answer('new'), answer('new'),
+  ]);
+  await screen.poll();
+  for (let poll = 0; poll < 4; poll++) await screen.pollAgain();
+  assert.equal(screen.element('version-notice').hidden, false);
+  assert.equal(screen.element('version-notice').textContent,
+      '버전 변경 old → new');
+  assert.equal(screen.element('version').classList.contains('changed'), true);
+  assert.equal(screen.element('version').children[0].textContent, 'new');
+});
+
+test('a canary shows each version with its share', async () => {
+  const answer = (version) => ({status: 200, body: liveBody({version})});
+  const screen = openDashboard(
+      ['old', 'new', 'old', 'new'].map(answer));
+  await screen.poll();
+  for (let poll = 0; poll < 3; poll++) await screen.pollAgain();
+  assert.deepEqual(
+      screen.element('version').children.map((chip) => chip.textContent),
+      ['new 50%', 'old 50%']);
 });
