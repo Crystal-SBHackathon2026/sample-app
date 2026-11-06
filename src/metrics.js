@@ -111,6 +111,9 @@ function createMetrics({ app, environment }) {
 
       // /metrics 자체는 세지 않는다. 30초마다 긁히니 에러율·지연 계산을 전부 덮어쓴다.
       if (route === "/metrics") return;
+      // 대시보드 폴링도 세지 않는다. 카나리 error-rate 에서 200 은 진짜 오류를 희석하고
+      // 503 은 멀쩡한 배포를 중단시킨다. DB 오류는 db_operations_total 에 남는다.
+      if (route === "/api/live") return;
 
       const labels = { method: req.method, route, status: String(res.statusCode) };
       const seconds = Number(process.hrtime.bigint() - startedAt) / 1e9;

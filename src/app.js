@@ -2,6 +2,8 @@ const express = require('express');
 const {createRequestRouter} = require('@team-ghost/request-store/express');
 const {createMetrics} = require('./metrics');
 const {createStoreFromEnv} = require('./db');
+const {createLiveStatus} = require('./live-status');
+const {renderLivePage} = require('./live-page');
 const {createRequestApiAuth} = require('./request-api-auth');
 const {createWriteControl} = require('./write-control');
 
@@ -12,12 +14,6 @@ const info = {
   region: process.env.DEPLOY_REGION || 'local',
   startedAt: new Date().toISOString(),
 };
-
-function escapeHtml(value) {
-  return String(value).replace(/[&<>"']/g, (character) => ({
-    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
-  })[character]);
-}
 
 /** Create a sample host; the request package can be mounted in other apps. */
 function createApp(options = {}) {
@@ -122,6 +118,14 @@ function createApp(options = {}) {
     }
   });
 
+  const liveStatus = createLiveStatus({store, control, appInfo});
+  app.get('/api/live', async (req, res, next) => {
+    try {
+      const {status, body} = await liveStatus.read();
+      res.set('Cache-Control', 'no-store').status(status).json(body);
+    } catch (error) { next(error); }
+  });
+
   // Auth answers before the control file, the body parser and the store.
   app.use('/api/requests', requestApiAuth.middleware);
   app.use('/api/requests', async (req, res, next) => {
@@ -144,20 +148,7 @@ function createApp(options = {}) {
       const database = await databaseStatus();
       databaseText = `${database.name} · ${database.row_count}건`;
     } catch { /* Keep the diagnostic page available during a DB outage. */ }
-    const version = appInfo.version.length === 40 ?
-        appInfo.version.slice(0, 7) : appInfo.version;
-    res.type('html').send(`<!doctype html>
-<html lang="ko"><head><meta charset="utf-8">
-<title>Ghost Migration Demo</title></head>
-<body style="font-family:sans-serif;max-width:600px;margin:60px auto">
-  <h1>Ghost Migration Demo</h1>
-  <p>응답한 환경: <b>${escapeHtml(appInfo.environment)}</b>
-    (${escapeHtml(appInfo.region)})</p>
-  <p>버전: <b>${escapeHtml(version)}</b></p>
-  <p>기동 시각: <b>${escapeHtml(appInfo.startedAt)}</b></p>
-  <p>연결 DB: <b>${escapeHtml(databaseText)}</b></p>
-  <p>쓰기 상태: <b>${store?.writesPaused ? '일시 정지' : '허용'}</b></p>
-</body></html>`);
+    res.type('html').send(renderLivePage({appInfo, databaseText}));
   });
 
   app.use((error, req, res, next) => {

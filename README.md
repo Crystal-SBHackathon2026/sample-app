@@ -27,8 +27,9 @@ curl http://localhost:8080/api/requests/21d10fd2-5b3c-4ab3-9c7f-c47ee6234e59
 
 | 경로 | 동작 |
 | --- | --- |
-| `/` | 환경·버전·기동 시각·DB·행 수·쓰기 상태 |
-| `/api/info` | 같은 정보를 JSON으로 반환(DB 건수는 최대1초 캐시) |
+| `/` | 실시간 대시보드: 환경·버전·행 수·초당 유입·최근 요청·쓰기 정지 배너 |
+| `/api/info` | 환경·버전·기동 시각·DB·행 수·쓰기 상태 JSON(DB 건수는 최대1초 캐시) |
+| `/api/live` | 대시보드 데이터 JSON(인증 없음, payload 제외, DB 읽기 1초 캐시) |
 | `POST /api/requests` | 새 저장201, 동일 요청200, 같은 ID 다른 내용409 |
 | `GET /api/requests/:id` | 저장 조회200, 없음404 |
 | `/healthz` | DB와 독립된 생존 검사 |
@@ -37,7 +38,7 @@ curl http://localhost:8080/api/requests/21d10fd2-5b3c-4ab3-9c7f-c47ee6234e59
 
 위 curl 예시는 인증 env를 두지 않은 로컬 open 모드입니다. 공개 배포는
 `REQUEST_API_AUTH=required`로 `/api/requests`의 POST·GET 모두 Bearer 토큰을
-요구합니다. 화면·`/healthz`·`/readyz`·`/api/info`·`/metrics`는 인증 없이
+요구합니다. 화면·`/healthz`·`/readyz`·`/api/info`·`/api/live`·`/metrics`는 인증 없이
 열려 있습니다. 토큰은 HTTPS와 헤더 파일로만 보내고 명령행에 쓰지 마세요
 ([배포 안내](docs/deployment.md#요청-api-인증)).
 

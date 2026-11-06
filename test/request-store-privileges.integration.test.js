@@ -36,6 +36,9 @@ test('actual app role needs SELECT/INSERT only and cannot own schema changes',
       assert.equal((await store.put(record)).created, false);
       assert.deepEqual((await store.get(id)).request, record);
       await store.checkReady();
+      const snapshot = await store.liveSnapshot(20);
+      assert.equal(snapshot.recent[0].request_id, id);
+      assert.equal('payload' in snapshot.recent[0], false);
       await assert.rejects(store.put({...record, payload: 'different'}),
           {code: 'REQUEST_CONFLICT'});
       const client = new Pool({connectionString: url.toString()});
