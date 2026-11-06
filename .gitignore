@@ -1,2 +1,11 @@
 node_modules/
 .env
+
+_workspace/
+_workspace_prev*/
+.claude/.sessions/
+.claude/.needs-*
+.claude/harness/*.template*
+*.jsonl
+*.lock
+!package-lock.json

@@ -7,6 +7,9 @@ const client = require("@prometheus-io/client");
 // 요청 경로는 express 가 매칭한 라우트 이름으로만 쓴다.
 // 들어온 URL 을 그대로 쓰면 없는 경로를 긁는 요청 하나하나가 새 시계열이 된다.
 const UNMATCHED = "unmatched";
+// Fixed label values keep the auth series bounded; no request input is used.
+const REQUEST_API_AUTH_MODES = ['open', 'enforced', 'closed'];
+const REQUEST_API_AUTH_REJECTION_REASONS = ['unauthorized', 'unconfigured'];
 
 function createMetrics({ app, environment }) {
   const register = new client.Registry();
@@ -31,11 +34,80 @@ function createMetrics({ app, environment }) {
     registers: [register],
   });
 
+  const dbOperations = new client.Counter({
+    name: "db_operations_total",
+    help: "Database operation outcomes",
+    labelNames: ["operation", "outcome"],
+    registers: [register],
+  });
+  const dbDuration = new client.Histogram({
+    name: "db_operation_duration_seconds",
+    help: "Database operation duration",
+    labelNames: ["operation"],
+    registers: [register],
+  });
+  const currentDatabase = new client.Gauge({
+    name: "app_database_info",
+    help: "Currently observed database (0 when disconnected)",
+    labelNames: ["database"],
+    registers: [register],
+  });
+  let previousDatabase;
+  function setDatabase(name) {
+    if (previousDatabase !== undefined) {
+      currentDatabase.remove({database: previousDatabase});
+    }
+    if (name !== null) {
+      previousDatabase = name;
+      currentDatabase.set({database: name}, 1);
+    } else {
+      previousDatabase = undefined;
+    }
+  }
+  function observeDatabase(event) {
+    dbOperations.inc({operation: event.operation, outcome: event.outcome});
+    dbDuration.observe({operation: event.operation}, event.seconds);
+  }
+  const writeControlHealthy = new client.Gauge({
+    name: 'app_write_control_healthy',
+    help: 'Write control file is valid (0 keeps writes paused)',
+    registers: [register],
+  });
+  writeControlHealthy.set(1);
+  function setWriteControlHealthy(healthy) {
+    writeControlHealthy.set(healthy ? 1 : 0);
+  }
+  const requestApiAuthMode = new client.Gauge({
+    name: 'app_request_api_auth_mode',
+    help: 'Request API auth mode chosen at startup (1 marks the current one)',
+    labelNames: ['mode'],
+    registers: [register],
+  });
+  function setRequestApiAuthMode(mode) {
+    for (const each of REQUEST_API_AUTH_MODES) {
+      requestApiAuthMode.set({mode: each}, each === mode ? 1 : 0);
+    }
+  }
+  const requestApiAuthRejections = new client.Counter({
+    name: 'app_request_api_auth_rejected_total',
+    help: 'Request API calls refused: 401 unauthorized, 503 unconfigured',
+    labelNames: ['reason'],
+    registers: [register],
+  });
+  for (const reason of REQUEST_API_AUTH_REJECTION_REASONS) {
+    requestApiAuthRejections.inc({reason}, 0);
+  }
+  function countRequestApiAuthRejection(reason) {
+    requestApiAuthRejections.inc({reason});
+  }
+
   function middleware(req, res, next) {
     const startedAt = process.hrtime.bigint();
 
     res.on("finish", () => {
-      const route = req.route ? req.route.path : UNMATCHED;
+      const route = req.route ? (req.baseUrl || '') +
+          (req.baseUrl && req.route.path === '/' ? '' : req.route.path) :
+          UNMATCHED;
 
       // /metrics 자체는 세지 않는다. 30초마다 긁히니 에러율·지연 계산을 전부 덮어쓴다.
       if (route === "/metrics") return;
@@ -50,7 +122,10 @@ function createMetrics({ app, environment }) {
     next();
   }
 
-  return { register, middleware };
+  return {
+    register, middleware, observeDatabase, setDatabase, setWriteControlHealthy,
+    setRequestApiAuthMode, countRequestApiAuthRejection,
+  };
 }
 
 module.exports = { createMetrics, UNMATCHED };
