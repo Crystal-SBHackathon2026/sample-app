@@ -63,6 +63,11 @@ function validateResponse(body, expected) {
     observedAt: new Date().toISOString()};
 }
 
+function isAccepted(body, expected) {
+  return body?.status === 'accepted' && body.request &&
+    FIELDS.every((key) => body.request[key] === expected[key]);
+}
+
 function percentile(values, fraction) {
   if (!values.length) return 0;
   const sorted = [...values].sort((a, b) => a - b);
@@ -119,6 +124,7 @@ async function createTrafficBot({adapter, ledgerDir, ratePerSecond = 1,
   let running = false;
   let processing;
   let loop;
+  let deliveryLoop;
   let summaryTimer;
   let generated = ledger.entries().filter((entry) =>
     entry.request.run_id === runId).reduce((last, entry) =>
@@ -139,6 +145,8 @@ async function createTrafficBot({adapter, ledgerDir, ratePerSecond = 1,
     return {
       at: new Date().toISOString(), paused, running,
       pending: entries.filter((entry) => entry.state === 'pending').length,
+      accepted_pending: entries.filter((entry) =>
+        entry.state === 'pending' && entry.acceptedAt).length,
       committed: entries.filter((entry) => entry.state === 'committed').length,
       failed: entries.filter((entry) => entry.state === 'failed').length,
       unknown: entries.filter((entry) => entry.state === 'unknown').length,
@@ -208,6 +216,13 @@ async function createTrafficBot({adapter, ledgerDir, ratePerSecond = 1,
   async function resolveByRead(entry, postObservation) {
     const found = await reconcile(entry);
     if (!found) return false;
+    if (isAccepted(found, entry.request)) {
+      await ledger.update(entry.request.request_id, {
+        acceptedAt: entry.acceptedAt || Date.now(),
+        nextAttemptAt: Date.now() + retryDelayMs, lastError: null,
+      });
+      return true; // Still pending; acceptance is never counted as committed.
+    }
     await commit(entry, found, postObservation);
     return true;
   }
@@ -227,6 +242,16 @@ async function createTrafficBot({adapter, ledgerDir, ratePerSecond = 1,
   }
 
   async function processEntry(entry) {
+    if (entry.acceptedAt) {
+      // The server owns an accepted request. Poll it; do not expire or POST
+      // again merely because migration takes longer than the retry budget.
+      try {
+        if (await resolveByRead(entry)) return;
+        return failOrRetry(entry, codedError('ACCEPTED_REQUEST_MISSING'));
+      } catch (error) {
+        return failOrRetry(entry, error, Boolean(error.terminal));
+      }
+    }
     if (Date.now() - entry.enqueuedAt >= maxRequestAgeMs) {
       if (entry.attempts > 0) {
         return reconcileFinal(entry, 'REQUEST_EXPIRED_UNCONFIRMED');
@@ -264,6 +289,13 @@ async function createTrafficBot({adapter, ledgerDir, ratePerSecond = 1,
   }
 
   async function confirmWrite(entry, result) {
+    if (isAccepted(result, entry.request)) {
+      await ledger.update(entry.request.request_id, {
+        acceptedAt: Date.now(), nextAttemptAt: Date.now() + retryDelayMs,
+        lastError: null,
+      });
+      return;
+    }
     let observation;
     let postError;
     try {
@@ -317,6 +349,7 @@ async function createTrafficBot({adapter, ledgerDir, ratePerSecond = 1,
     const safeCodes = ['RESPONSE_INVALID', 'CONTENT_CONFLICT',
       'INVALID_JSON_RESPONSE', 'RESPONSE_TOO_LARGE', 'HTTP_TRANSPORT_ERROR',
       'REQUEST_ABORTED', 'WRITES_PAUSED'];
+    safeCodes.push('ACCEPTED_REQUEST_MISSING');
     // The caller identifies proof from the first POST or a validated GET.
     // A later POST refusal or any GET failure cannot settle prior writes.
     const failed = confirmedFailure;
@@ -381,9 +414,7 @@ async function createTrafficBot({adapter, ledgerDir, ratePerSecond = 1,
       running = true;
       summaryTimer = setInterval(report, 1000);
       loop = (async () => {
-        // Recover all pending work once before creating a new request.
-        await processPending();
-        while (!stopped) {
+        while (!stopped && running) {
           const started = Date.now();
           try {
             if (snapshot().pending >= maxPending) {
@@ -403,7 +434,6 @@ async function createTrafficBot({adapter, ledgerDir, ratePerSecond = 1,
               break;
             }
           }
-          await processPending();
           if (!stopped) {
             await delay(Math.max(1,
                 1000 / ratePerSecond - (Date.now() - started)), undefined,
@@ -418,14 +448,26 @@ async function createTrafficBot({adapter, ledgerDir, ratePerSecond = 1,
         running = false;
         report();
       });
-      return loop;
+      // Generation stays independent of read latency and accumulated backlog.
+      deliveryLoop = (async () => {
+        while (!stopped && running) {
+          await processPending();
+          await delay(10, undefined, {signal: wake.signal}).catch((error) => {
+            if (error.name !== 'AbortError') throw error;
+          });
+        }
+      })().catch((error) => {
+        fatalCode = error.code === LOCK_LOST ? LOCK_LOST : 'LEDGER_PROCESSING_FAILED';
+        running = false; report();
+      });
+      return Promise.all([loop, deliveryLoop]);
     },
     metrics() {
       const value = snapshot();
       const lines = [
         '# HELP traffic_bot_requests_total Durable request outcomes',
         '# TYPE traffic_bot_requests_total gauge',
-        ...['pending', 'committed', 'failed', 'unknown'].map((state) =>
+        ...['pending', 'accepted_pending', 'committed', 'failed', 'unknown'].map((state) =>
           `traffic_bot_requests_total{state=${label(state)}} ${value[state]}`),
         '# TYPE traffic_bot_attempts_total counter',
         ...Object.entries(counters).map(([kind, count]) =>
@@ -454,6 +496,7 @@ async function createTrafficBot({adapter, ledgerDir, ratePerSecond = 1,
         controller.abort();
       }
       if (loop) await loop;
+      if (deliveryLoop) await deliveryLoop;
       if (processing) await processing;
       finalSnapshot = snapshot();
       await ledger.close();

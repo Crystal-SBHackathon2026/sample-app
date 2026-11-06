@@ -64,7 +64,9 @@ async function openLedger({dir, maxPending = 1000,
           !Number.isSafeInteger(entry.attempts) || entry.attempts < 0 ||
           !Number.isSafeInteger(entry.enqueuedAt) || entry.enqueuedAt < 0 ||
           !Number.isSafeInteger(entry.nextAttemptAt) ||
-          entry.nextAttemptAt < 0) {
+          entry.nextAttemptAt < 0 ||
+          (entry.acceptedAt !== undefined &&
+            (!Number.isSafeInteger(entry.acceptedAt) || entry.acceptedAt < 0))) {
         throw new Error('invalid ledger entry');
       }
       ids.add(entry.request.request_id);
@@ -152,7 +154,7 @@ async function openLedger({dir, maxPending = 1000,
         if (!entry) throw new Error('unknown request ID');
         for (const key of Object.keys(changes)) {
           if (!['state', 'attempts', 'nextAttemptAt', 'completedAt',
-            'lastError', 'observations'].includes(key)) {
+            'lastError', 'observations', 'acceptedAt'].includes(key)) {
             throw new Error('immutable ledger field');
           }
         }
