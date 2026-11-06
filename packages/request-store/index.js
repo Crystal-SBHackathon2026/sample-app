@@ -10,6 +10,12 @@ const INSERT = `INSERT INTO public.migration_demo
     (request_id, run_id, phase, request_no, payload, created_at)
     VALUES ($1,$2,$3,$4,$5,$6)
     ON CONFLICT (request_id) DO NOTHING RETURNING ${COLUMNS}`;
+const STATUS = `SELECT current_database() AS name,
+          count(*)::text AS row_count FROM public.migration_demo`;
+const RECENT = `SELECT request_id, run_id, phase, created_at
+          FROM public.migration_demo
+          ORDER BY created_at DESC, request_id DESC
+          LIMIT $1`;
 
 function unavailable() {
   return new RequestStoreError('DB_UNAVAILABLE', 'Database is unavailable');
@@ -247,9 +253,17 @@ function createPostgresRequestStore(options = {}) {
 
     async status() {
       return useClient('status', async (client) => {
-        const result = await client.query(`SELECT current_database() AS name,
-          count(*)::text AS row_count FROM public.migration_demo`);
+        const result = await client.query(STATUS);
         return result.rows[0];
+      });
+    },
+
+    /** Row count plus the newest rows, without payload or request_no. */
+    async liveSnapshot(limit) {
+      return useClient('live', async (client) => {
+        const status = (await client.query(STATUS)).rows[0];
+        const recent = await client.query(RECENT, [limit]);
+        return {...status, recent: recent.rows.map(rowRecord)};
       });
     },
 

@@ -771,3 +771,36 @@ test('invalid response context returns 500 before the store is touched',
       }
       assert.equal(storeCalls, 0);
     });
+
+test('liveSnapshot only SELECTs, omits payload and orders newest first',
+    async () => {
+      const queries = [];
+      const created = new Date('2026-11-06T00:00:00Z');
+      const client = {
+        async query(sql, params) {
+          queries.push({sql, params});
+          return /count\(\*\)/.test(sql) ?
+              {rows: [{name: 'demo', row_count: '2'}]} :
+              {rows: [{request_id: 'id', run_id: 'r', phase: 'p',
+                created_at: created}]};
+        },
+        release() {},
+      };
+      const store = createPostgresRequestStore({poolFactory: () => ({
+        on() {}, connect: async () => client, end: async () => {},
+      })});
+      assert.deepEqual(await store.liveSnapshot(20), {
+        name: 'demo', row_count: '2', recent: [{
+          request_id: 'id', run_id: 'r', phase: 'p',
+          created_at: '2026-11-06T00:00:00.000Z',
+        }],
+      });
+      for (const {sql} of queries) {
+        assert.match(sql, /^\s*SELECT/);
+        assert.doesNotMatch(sql, /payload|request_no|INSERT|UPDATE|DELETE/);
+      }
+      assert.match(queries[1].sql,
+          /ORDER BY created_at DESC, request_id DESC\s+LIMIT \$1/);
+      assert.deepEqual(queries[1].params, [20]);
+      await store.close();
+    });
