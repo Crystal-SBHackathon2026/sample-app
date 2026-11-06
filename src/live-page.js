@@ -54,13 +54,14 @@ function createIngestTracker() {
    * Only the newest part is credited: a long gap stays visibly unobserved
    * instead of being painted over with an average nobody measured.
    */
-  function recordGrowth(growth, observedAtMs) {
+  function recordGrowth(growth, observedAtMs, environment) {
     const rowsPerMilli = growth / (observedAtMs - lastObservedMs);
     let from = Math.max(lastObservedMs, observedAtMs - MAX_FILLED_MILLIS);
     while (from < observedAtMs) {
       const second = Math.floor(from / 1000);
       const until = Math.min((second + 1) * 1000, observedAtMs);
-      const bucket = observedBySecond.get(second) || {rows: 0, millis: 0};
+      const bucket = observedBySecond.get(second) ||
+          {rows: 0, millis: 0, environment};
       bucket.rows += rowsPerMilli * (until - from);
       bucket.millis += until - from;
       observedBySecond.set(second, bucket);
@@ -77,6 +78,15 @@ function createIngestTracker() {
       observedBySecond.get(endSecond - count + 1 + index));
   }
 
+  const rateOf = (bucket) => bucket.rows * 1000 / bucket.millis;
+
+  /** Observed buckets of the current deployment within the last seconds. */
+  function bucketsSinceBaseline(endSecond, seconds) {
+    const sinceBaseline = endSecond - baselineSecond + 1;
+    const window = Math.max(0, Math.min(seconds, sinceBaseline));
+    return buckets(endSecond, window).filter(Boolean);
+  }
+
   return {
     /** Returns 'baseline', 'newer', or 'stale' for a sample to be ignored. */
     record(sample) {
@@ -91,23 +101,31 @@ function createIngestTracker() {
         return 'baseline';
       }
       const growth = Math.max(0, sample.rowCount - highestCount);
-      recordGrowth(growth, sample.observedAtMs);
+      recordGrowth(growth, sample.observedAtMs, sample.environment);
       highestCount = Math.max(highestCount, sample.rowCount);
       lastObservedMs = sample.observedAtMs;
       if (growth > 0) lastWriteMs = sample.observedAtMs;
       return 'newer';
     },
-    /** Drops all history, for a deployment whose rows cannot be read yet. */
+    /**
+     * Drops the numbers of a deployment that was replaced by one whose rows
+     * cannot be read yet. The chart keeps its bars: they show who served when.
+     */
     forget() {
-      observedBySecond.clear();
       identity = null;
       highestCount = 0;
       lastWriteMs = null;
+      baselineSecond = Infinity;
     },
-    /** Rates per second up to endSecond; null marks an unobserved second. */
-    series(endSecond, count) {
-      return buckets(endSecond, count).map((bucket) =>
-        bucket ? bucket.rows * 1000 / bucket.millis : null);
+    /** Rates up to endSecond with their environment; null means unobserved. */
+    bars(endSecond, count) {
+      return buckets(endSecond, count).map((bucket) => (bucket ?
+        {rate: rateOf(bucket), environment: bucket.environment} : null));
+    },
+    /** Highest rate of the current deployment; null when nothing observed. */
+    peakRate(endSecond, seconds) {
+      const observed = bucketsSinceBaseline(endSecond, seconds);
+      return observed.length === 0 ? null : Math.max(...observed.map(rateOf));
     },
     /**
      * Rows per second over observed time since the last baseline, so a number
@@ -115,9 +133,7 @@ function createIngestTracker() {
      * nothing was observed.
      */
     averageRate(endSecond, seconds) {
-      const sinceBaseline = endSecond - baselineSecond + 1;
-      const window = Math.max(0, Math.min(seconds, sinceBaseline));
-      const observed = buckets(endSecond, window).filter(Boolean);
+      const observed = bucketsSinceBaseline(endSecond, seconds);
       if (observed.length === 0) return null;
       const rows = observed.reduce((sum, bucket) => sum + bucket.rows, 0);
       const millis = observed.reduce((sum, bucket) => sum + bucket.millis, 0);
@@ -136,8 +152,12 @@ function runDashboard() {
   const CHART_SECONDS = 60;
   // Samples arrive up to two seconds late; keep them off the chart's edge.
   const CHART_LAG_SECONDS = 2;
-  const CHART_WIDTH = 600;
   const CHART_HEIGHT = 120;
+  const BAR_STEP = 10;
+  const BAR_WIDTH = 8;
+  // An observed zero keeps a sliver, so it never reads as an unobserved gap.
+  const MIN_BAR_HEIGHT = 3;
+  const SVG_NAMESPACE = 'http://www.w3.org/2000/svg';
   const FULL_COMMIT_CHARACTERS = 40;
   const SHORT_COMMIT_CHARACTERS = 7;
 
@@ -213,6 +233,7 @@ function runDashboard() {
     const newest = live.recent[0];
     const outcome = tracker.record({
       identity: `${live.environment}/${live.database.name}`,
+      environment: live.environment,
       rowCount: Number(live.database.row_count),
       observedAtMs,
       newestCreatedAtMs: newest ? Date.parse(newest.created_at) : null,
@@ -263,42 +284,22 @@ function runDashboard() {
     setTimeout(poll, Math.max(0, POLL_MILLIS - (Date.now() - startedMs)));
   }
 
-  function pathFor(series, largest, closePath) {
-    const xFor = (index) => index * CHART_WIDTH / (series.length - 1);
-    const yFor = (rate) => CHART_HEIGHT - rate / largest * (CHART_HEIGHT - 4);
-    let path = '';
-    let start = null;
-    series.forEach((rate, index) => {
-      if (rate !== null) {
-        if (start === null) start = index;
-        path += `${index === start ? 'M' : 'L'}${xFor(index)} ${yFor(rate)}`;
-      }
-      if (start !== null &&
-          (index === series.length - 1 || series[index + 1] === null)) {
-        // A lone observed second still needs width to be visible.
-        if (index === start) path += `h${CHART_WIDTH / series.length}`;
-        const endX = index === start ?
-            xFor(index) + CHART_WIDTH / series.length : xFor(index);
-        if (closePath) {
-          path += `L${endX} ${CHART_HEIGHT}L${xFor(start)} ${CHART_HEIGHT}Z`;
-        }
-        start = null;
-      }
-    });
-    return path;
-  }
-
   function renderChart(nowSecond) {
-    const series = tracker.series(nowSecond - CHART_LAG_SECONDS, CHART_SECONDS);
-    const observed = series.filter((rate) => rate !== null);
-    const peak = Math.max(0, ...observed);
-    // The axis floor keeps a trickle from filling the chart; it is not data.
-    const largest = Math.max(1, peak);
-    element('sparkline-line').setAttribute('d',
-        pathFor(series, largest, false));
-    element('sparkline-area').setAttribute('d',
-        pathFor(series, largest, true));
-    element('sparkline-peak').textContent = observed.length === 0 ? '' :
+    const endSecond = nowSecond - CHART_LAG_SECONDS;
+    const bars = tracker.bars(endSecond, CHART_SECONDS);
+    const rates = bars.filter(Boolean).map((bar) => bar.rate);
+    // The axis fits every bar shown; its floor keeps a trickle from filling it.
+    const largest = Math.max(1, ...rates);
+    const shapes = element('sparkline-bars').children;
+    bars.forEach((bar, index) => {
+      const height = bar ? Math.max(MIN_BAR_HEIGHT,
+          bar.rate / largest * (CHART_HEIGHT - MIN_BAR_HEIGHT)) : 0;
+      shapes[index].setAttribute('height', height);
+      shapes[index].setAttribute('y', CHART_HEIGHT - height);
+      if (bar) shapes[index].setAttribute('data-environment', bar.environment);
+    });
+    const peak = tracker.peakRate(endSecond, CHART_SECONDS);
+    element('sparkline-peak').textContent = peak === null ? '' :
         `최대 ${peak.toFixed(peak < 10 ? 1 : 0)}/초`;
   }
 
@@ -320,7 +321,10 @@ function runDashboard() {
   function render() {
     const nowMs = serverNowMs();
     const nowSecond = Math.floor(nowMs / 1000);
-    const rate = tracker.averageRate(nowSecond, RATE_WINDOW_SECONDS);
+    // Nothing is being measured during an outage, so no rate is claimed.
+    const measuring = appAnswering !== false && databaseAnswering;
+    const rate = measuring ?
+        tracker.averageRate(nowSecond, RATE_WINDOW_SECONDS) : null;
     element('rate').textContent = rate === null ? '—' : rate.toFixed(1);
     const lastWrite = tracker.lastWriteMs();
     element('last-write').textContent = lastWrite === null ? '—' :
@@ -329,6 +333,12 @@ function runDashboard() {
     renderStatus(Date.now());
   }
 
+  for (let index = 0; index < CHART_SECONDS; index++) {
+    const bar = document.createElementNS(SVG_NAMESPACE, 'rect');
+    bar.setAttribute('x', index * BAR_STEP);
+    bar.setAttribute('width', BAR_WIDTH);
+    element('sparkline-bars').append(bar);
+  }
   poll();
   render();
   setInterval(render, RENDER_MILLIS);
@@ -341,9 +351,9 @@ const STYLE = `
   --text: #e6edf3; --muted: #9aa7b4; --alert: #ff6b6b;
   --environment: #9aa7b4;
 }
-body[data-environment="onprem"] { --environment: #2dd4bf; }
-body[data-environment="aws"] { --environment: #ff9900; }
-body[data-environment="gcp"] { --environment: #60a5fa; }
+[data-environment="onprem"] { --environment: #2dd4bf; }
+[data-environment="aws"] { --environment: #ff9900; }
+[data-environment="gcp"] { --environment: #60a5fa; }
 * { box-sizing: border-box; }
 html, body { height: 100%; margin: 0; }
 body {
@@ -395,11 +405,7 @@ main {
 #chart { flex: 1; display: flex; flex-direction: column; min-height: 160px; }
 #chart-heading { display: flex; justify-content: space-between; }
 #chart svg { flex: 1; width: 100%; min-height: 0; margin-top: .4em; }
-#sparkline-area { fill: var(--environment); fill-opacity: .18; }
-#sparkline-line {
-  fill: none; stroke: var(--environment); stroke-width: 2;
-  stroke-linejoin: round; vector-effect: non-scaling-stroke;
-}
+rect { --environment: #9aa7b4; fill: var(--environment); }
 #sparkline-baseline {
   stroke: var(--line); stroke-width: 1; vector-effect: non-scaling-stroke;
 }
@@ -471,7 +477,7 @@ function renderLivePage({appInfo, databaseText}) {
         <svg viewBox="0 0 600 120" preserveAspectRatio="none" role="img"
             aria-label="최근 60초 초당 유입량. 끊긴 구간은 비어 있음">
           <line id="sparkline-baseline" x1="0" y1="120" x2="600" y2="120"/>
-          <path id="sparkline-area"/><path id="sparkline-line"/>
+          <g id="sparkline-bars"></g>
         </svg>
       </div>
     </div>

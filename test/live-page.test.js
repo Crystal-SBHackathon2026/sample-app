@@ -5,6 +5,9 @@ const {createIngestTracker, renderLivePage} = require('../src/live-page');
 
 const IDENTITY = 'aws/demo';
 
+const series = (tracker, endSecond, count) => tracker.bars(endSecond, count)
+    .map((bar) => (bar ? bar.rate : null));
+
 function sample(tracker, rowCount, seconds, identity = IDENTITY) {
   tracker.record({identity, rowCount, observedAtMs: seconds * 1000,
     newestCreatedAtMs: null});
@@ -17,14 +20,14 @@ test('a steady stream reads as its true rate', () => {
     sample(tracker, 100 + second * 5, 1000 + second);
   }
   assert.equal(tracker.averageRate(1009, 10), 5);
-  assert.deepEqual(tracker.series(1009, 3), [5, 5, 5]);
+  assert.deepEqual(series(tracker, 1009, 3), [5, 5, 5]);
 });
 
 test('the first sample is a baseline, not a burst of ingest', () => {
   const tracker = createIngestTracker();
   sample(tracker, 170000, 1000);
   assert.equal(tracker.averageRate(1000, 10), null);
-  assert.deepEqual(tracker.series(1000, 2), [null, null]);
+  assert.deepEqual(series(tracker, 1000, 2), [null, null]);
 });
 
 test('a gap spreads its growth by time and leaves older seconds unobserved',
@@ -32,9 +35,9 @@ test('a gap spreads its growth by time and leaves older seconds unobserved',
       const tracker = createIngestTracker();
       sample(tracker, 0, 1000);
       sample(tracker, 300, 1030);
-      const series = tracker.series(1029, 30);
-      assert.deepEqual(series.slice(-3), [10, 10, 10]);
-      assert.deepEqual(series.slice(0, 27), new Array(27).fill(null));
+      const rates = series(tracker, 1029, 30);
+      assert.deepEqual(rates.slice(-3), [10, 10, 10]);
+      assert.deepEqual(rates.slice(0, 27), new Array(27).fill(null));
       assert.equal(tracker.averageRate(1029, 10), 10);
     });
 
@@ -46,7 +49,7 @@ test('samples straddling second boundaries keep a steady rate flat', () => {
     const rows = index === 0 ? 0 : Math.round((seconds - times[0]) * 5);
     sample(tracker, rows, seconds);
   });
-  for (const rate of tracker.series(1005, 4)) {
+  for (const rate of series(tracker, 1005, 4)) {
     assert.ok(Math.abs(rate - 5) < 0.3, String(rate));
   }
 });
@@ -55,7 +58,7 @@ test('a sample with no growth is an observed zero, not a gap', () => {
   const tracker = createIngestTracker();
   sample(tracker, 10, 1000);
   sample(tracker, 10, 1001);
-  assert.deepEqual(tracker.series(1000, 1), [0]);
+  assert.deepEqual(series(tracker, 1000, 1), [0]);
   assert.equal(tracker.averageRate(1000, 10), 0);
 });
 
@@ -67,7 +70,7 @@ test('replicas answering out of step never inflate an insert-only count',
       sample(tracker, 103, 1002);
       sample(tracker, 105, 1003);
       sample(tracker, 106, 1004);
-      assert.deepEqual(tracker.series(1003, 4), [5, 0, 0, 1]);
+      assert.deepEqual(series(tracker, 1003, 4), [5, 0, 0, 1]);
     });
 
 test('a cached or older sample is ignored', () => {
@@ -76,9 +79,9 @@ test('a cached or older sample is ignored', () => {
   sample(tracker, 110, 1002);
   sample(tracker, 110, 1002);
   sample(tracker, 111, 1001);
-  assert.deepEqual(tracker.series(1001, 2), [5, 5]);
+  assert.deepEqual(series(tracker, 1001, 2), [5, 5]);
   sample(tracker, 115, 1003);
-  assert.deepEqual(tracker.series(1002, 1), [5]);
+  assert.deepEqual(series(tracker, 1002, 1), [5]);
 });
 
 test('switching database is a new baseline, not a spike', () => {
@@ -86,9 +89,9 @@ test('switching database is a new baseline, not a spike', () => {
   sample(tracker, 100, 1000);
   sample(tracker, 101, 1001);
   sample(tracker, 170675, 1002, 'onprem/migration_demo_return');
-  assert.deepEqual(tracker.series(1001, 2), [1, null]);
+  assert.deepEqual(series(tracker, 1001, 2), [1, null]);
   sample(tracker, 170676, 1003, 'onprem/migration_demo_return');
-  assert.deepEqual(tracker.series(1002, 1), [1]);
+  assert.deepEqual(series(tracker, 1002, 1), [1]);
 });
 
 test('a database rebuilt under the same name is a new baseline', () => {
@@ -108,7 +111,7 @@ test('the average never reaches back across a new baseline', () => {
   sample(tracker, 5002, 1002.5, 'gcp/demo_gcp');
   assert.equal(tracker.averageRate(1002, 10), 2);
   // The chart keeps the previous environment's seconds on purpose.
-  assert.equal(tracker.series(1000, 1)[0], 10);
+  assert.equal(series(tracker, 1000, 1)[0], 10);
 });
 
 test('a new environment with a slower clock inherits no previous seconds',
@@ -117,13 +120,43 @@ test('a new environment with a slower clock inherits no previous seconds',
       sample(tracker, 100, 1000);
       sample(tracker, 200, 1001);
       sample(tracker, 300, 1002);
-      // gcp's clock runs 1.5 s behind, so its baseline predates aws's last rows.
+      // gcp's clock runs 1.5 s behind: its baseline predates aws's last rows.
       sample(tracker, 5000, 1000.5, 'gcp/demo_gcp');
       assert.equal(tracker.averageRate(1002, 10), null);
       sample(tracker, 5000, 1001.5, 'gcp/demo_gcp');
       sample(tracker, 5000, 1002.5, 'gcp/demo_gcp');
       assert.equal(tracker.averageRate(1002, 10), 0);
     });
+
+test('each chart bar keeps the environment of its own second', () => {
+  const tracker = createIngestTracker();
+  const next = (environment, rowCount, seconds) => tracker.record({
+    identity: `${environment}/db`, environment, rowCount,
+    observedAtMs: seconds * 1000, newestCreatedAtMs: null,
+  });
+  next('aws', 100, 1000);
+  next('aws', 150, 1001);
+  next('gcp', 5000, 1004);
+  next('gcp', 5002, 1005);
+  assert.deepEqual(tracker.bars(1004, 5), [
+    {rate: 50, environment: 'aws'}, null, null, null,
+    {rate: 2, environment: 'gcp'},
+  ]);
+});
+
+test('the peak counts the current environment only', () => {
+  const tracker = createIngestTracker();
+  const next = (environment, rowCount, seconds) => tracker.record({
+    identity: `${environment}/db`, environment, rowCount,
+    observedAtMs: seconds * 1000, newestCreatedAtMs: null,
+  });
+  next('aws', 100, 1000);
+  next('aws', 150, 1001);
+  next('gcp', 5000, 1002);
+  assert.equal(tracker.peakRate(1002, 60), null);
+  next('gcp', 5002, 1003);
+  assert.equal(tracker.peakRate(1002, 60), 2);
+});
 
 test('only a fall of more than 10% counts as a rebuilt database', () => {
   const tracker = createIngestTracker();
@@ -144,15 +177,18 @@ test('an older answer stays stale even when its count looks like a rebuild',
       assert.equal(tracker.highestCount(), 10);
     });
 
-test('forgetting drops history and the next sample is a new baseline', () => {
+test('forgetting drops the numbers; the next sample is a new baseline', () => {
   const tracker = createIngestTracker();
   sample(tracker, 100, 1000);
   sample(tracker, 105, 1001);
   tracker.forget();
-  assert.deepEqual(tracker.series(1000, 1), [null]);
+  assert.equal(tracker.averageRate(1001, 10), null);
+  assert.equal(tracker.peakRate(1001, 60), null);
   assert.equal(tracker.lastWriteMs(), null);
+  // The bars still show who served when.
+  assert.deepEqual(series(tracker, 1000, 1), [5]);
   sample(tracker, 170000, 1002);
-  assert.deepEqual(tracker.series(1002, 1), [null]);
+  assert.deepEqual(series(tracker, 1002, 1), [null]);
   assert.equal(tracker.highestCount(), 170000);
 });
 
@@ -195,8 +231,8 @@ test('old seconds are dropped, but never inside the 60 second chart', () => {
   for (let second = 1; second <= 500; second++) {
     sample(tracker, second, 1000 + second);
   }
-  assert.equal(tracker.series(1499, 60)[0], 1);
-  assert.deepEqual(tracker.series(1200, 1), [null]);
+  assert.equal(series(tracker, 1499, 60)[0], 1);
+  assert.deepEqual(series(tracker, 1200, 1), [null]);
 });
 
 test('the page is one document with its script inline', () => {
@@ -223,7 +259,10 @@ function fakeElement() {
       toggle: (name, on) => (on ? classes.add(name) : classes.delete(name)),
       contains: (name) => classes.has(name),
     },
-    setAttribute() {},
+    attributes: {},
+    setAttribute(name, value) {
+      this.attributes = {...this.attributes, [name]: String(value)};
+    },
     addEventListener() {},
     append(child) { this.children.push(child); },
     insertBefore(child, before) {
@@ -256,6 +295,7 @@ function openDashboard(responses) {
     document: {
       getElementById: element, body: element('body'),
       createElement: fakeElement,
+      createElementNS: fakeElement,
     },
     fetch: async () => {
       const next = responses.shift();
@@ -319,12 +359,21 @@ test('writes_paused raises the banner, on a DB outage too', async () => {
 });
 
 test('a failed poll says no response and keeps the last data', async () => {
-  const screen = openDashboard([{status: 200, body: liveBody()},
-    new Error('network down')]);
+  const now = Date.now();
+  const at = (ms) => new Date(now + ms).toISOString();
+  const screen = openDashboard([
+    {status: 200, body: liveBody({observed_at: at(-1000)})},
+    {status: 200, body: liveBody({observed_at: at(0),
+      database: {name: 'source', row_count: '1000'}})},
+    new Error('network down'),
+  ]);
   await screen.poll();
+  await screen.pollAgain();
+  assert.equal(screen.element('rate').textContent, '0.0');
   await screen.pollAgain();
   assert.match(screen.element('status').textContent, /^응답 없음 \d+초$/);
   assert.equal(screen.element('body').classList.contains('stale'), true);
+  assert.equal(screen.element('rate').textContent, '—');
   assert.equal(screen.element('total').textContent, '1,000');
 });
 
@@ -353,15 +402,58 @@ test('a new environment without a DB drops the old environment data',
 
 test('the same environment keeps its last data through a DB outage',
     async () => {
+      const now = Date.now();
+      const at = (ms) => new Date(now + ms).toISOString();
       const outage = liveBody({database: null, recent: [],
         error: {code: 'DB_UNAVAILABLE', message: 'x'}});
-      const screen = openDashboard([{status: 200, body: liveBody()},
-        {status: 503, body: outage}]);
+      const screen = openDashboard([
+        {status: 200, body: liveBody({observed_at: at(-1000)})},
+        {status: 200, body: liveBody({observed_at: at(0)})},
+        {status: 503, body: outage},
+      ]);
       await screen.poll();
+      await screen.pollAgain();
+      assert.equal(screen.element('rate').textContent, '0.0');
       await screen.pollAgain();
       assert.equal(screen.element('total').textContent, '1,000');
       assert.equal(screen.element('rows').children.length, 1);
+      assert.equal(screen.element('rate').textContent, '—');
     });
+
+test('a new environment without a DB keeps the bars of the old one',
+    async () => {
+      const now = Date.now();
+      const at = (ms) => new Date(now + ms).toISOString();
+      const aws = (rows, ms) => liveBody({environment: 'aws',
+        observed_at: at(ms), database: {name: 'db', row_count: String(rows)}});
+      const screen = openDashboard([
+        {status: 200, body: aws(100, -3000)},
+        {status: 200, body: aws(110, -2000)},
+        {status: 200, body: aws(120, -1000)},
+        {status: 200, body: aws(130, 0)},
+        {status: 503, body: liveBody({environment: 'gcp', database: null,
+          recent: [], error: {code: 'DB_UNAVAILABLE', message: 'x'}})},
+      ]);
+      await screen.poll();
+      for (let poll = 0; poll < 4; poll++) await screen.pollAgain();
+      const shown = screen.element('sparkline-bars').children
+          .filter((bar) => bar.attributes.height !== '0');
+      assert.ok(shown.length >= 1);
+      assert.ok(shown.every((bar) =>
+        bar.attributes['data-environment'] === 'aws'));
+      assert.equal(screen.element('rate').textContent, '—');
+      assert.equal(screen.element('sparkline-peak').textContent, '');
+    });
+
+test('environment colors beat the default bar color', () => {
+  const page = renderLivePage({
+    appInfo: {environment: 'e', region: 'r', version: 'v'}, databaseText: 'd',
+  });
+  // A selector with a class or id would outrank [data-environment] and gray out
+  // every bar.
+  assert.match(page, /^rect \{ --environment:/m);
+  assert.doesNotMatch(page, /[.#][\w-]+ rect \{/);
+});
 
 test('status stays connecting until the first answer', async () => {
   const screen = openDashboard([]);
@@ -454,6 +546,57 @@ test('aws to gcp leaves no aws number on the gcp screen', async () => {
   assert.equal(rows.length, 1);
   assert.equal(rows[0].children[1].textContent, 'gcp_seed');
   assert.equal(rows[0].classList.contains('fresh'), false);
+});
+
+test('bars are colored by their own environment, gaps stay empty',
+    async () => {
+  const now = Date.now();
+  const at = (ms) => new Date(now + ms).toISOString();
+  const body = (environment, rows, ms) => liveBody({environment,
+    observed_at: at(ms), database: {name: 'db', row_count: String(rows)}});
+  const screen = openDashboard([
+    {status: 200, body: body('aws', 100, -11000)},
+    {status: 200, body: body('aws', 200, -10000)},
+    {status: 200, body: body('gcp', 5000, -5000)},
+    {status: 200, body: body('gcp', 5003, -4000)},
+    {status: 200, body: body('gcp', 5006, -3000)},
+    {status: 200, body: body('gcp', 5009, -2000)},
+    {status: 200, body: body('gcp', 5012, -1000)},
+    {status: 200, body: body('gcp', 5015, 0)},
+  ]);
+  await screen.poll();
+  for (let poll = 0; poll < 7; poll++) await screen.pollAgain();
+  const bars = screen.element('sparkline-bars').children;
+  assert.equal(bars.length, 60);
+  const shown = bars.filter((bar) => bar.attributes.height !== '0');
+  const environments = shown.map((bar) => bar.attributes['data-environment']);
+  assert.equal(environments[0], 'aws');
+  const firstGcp = environments.indexOf('gcp');
+  assert.ok(firstGcp > 0);
+  assert.ok(environments.slice(firstGcp).every((name) => name === 'gcp'));
+  // The silent seconds between the two environments stay empty.
+  const lastAws = shown[firstGcp - 1];
+  assert.ok(Number(lastAws.attributes.x) + 20 <
+      Number(shown[firstGcp].attributes.x));
+  assert.equal(screen.element('sparkline-peak').textContent, '최대 3.0/초');
+});
+
+test('an observed zero stays visible, unlike an unobserved second',
+    async () => {
+  const now = Date.now();
+  const at = (ms) => new Date(now + ms).toISOString();
+  const screen = openDashboard([
+    {status: 200, body: liveBody({observed_at: at(-3000)})},
+    {status: 200, body: liveBody({observed_at: at(-2000)})},
+    {status: 200, body: liveBody({observed_at: at(-1000)})},
+    {status: 200, body: liveBody({observed_at: at(0)})},
+  ]);
+  await screen.poll();
+  for (let poll = 0; poll < 3; poll++) await screen.pollAgain();
+  const shown = screen.element('sparkline-bars').children
+      .filter((bar) => bar.attributes.height !== '0');
+  assert.ok(shown.length >= 1);
+  assert.ok(shown.every((bar) => Number(bar.attributes.height) > 0));
 });
 
 test('replicas out of step never make the total go backwards', async () => {
