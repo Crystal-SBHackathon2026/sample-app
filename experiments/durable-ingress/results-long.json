@@ -1,0 +1,60 @@
+{
+  "scope": "isolated real Redis + PostgreSQL + existing sample-app API; no AWS CDC or live cutover",
+  "tests": [
+    {
+      "test": "existing_app_during_pause",
+      "http": 503,
+      "layer": "app rejects; no server-side acceptance"
+    },
+    {
+      "test": "paused_consumer_restart",
+      "passed": true
+    },
+    {
+      "test": "pause_exceeding_legacy_expiry",
+      "hold_seconds": 310,
+      "accepted": 3100,
+      "first_http_failures": 0,
+      "lost": 0,
+      "duplicates": 0,
+      "payload_mismatch": 0,
+      "drain_seconds": 55.167,
+      "acceptance_p95_ms": 11.408625000010943,
+      "acceptance_max_ms": 132.8679589999956,
+      "total_seconds": 365.699
+    },
+    {
+      "test": "consumer_killed_after_db_commit_before_ack",
+      "lost": 0,
+      "duplicate_rows": 0,
+      "passed": true
+    },
+    {
+      "test": "redis_crash_after_202",
+      "accepted_loss": 0,
+      "outage_http": 503,
+      "layer": "single Redis unavailable: ingress rejects new request, does not falsely accept",
+      "passed": true
+    },
+    {
+      "test": "same_id_different_payload",
+      "http": 409
+    },
+    {
+      "test": "five_minute_local_rehearsal",
+      "requests": 250,
+      "pause_seconds": 21.379,
+      "total_seconds": 26.519,
+      "accepted_total": 3352,
+      "db_rows": 3352,
+      "lost": 0
+    }
+  ],
+  "final_verification": {
+    "accepted_ids": 3352,
+    "db_ids": 3352,
+    "pending": 0,
+    "all_fields_match": true
+  },
+  "result": "PASS_WITH_AVAILABILITY_LIMIT"
+}
