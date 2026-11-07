@@ -1,3 +1,4 @@
+const {readLedger} = require('./bot-ledger-reader');
 const {test} = require('node:test');
 const assert = require('node:assert/strict');
 const {randomUUID} = require('node:crypto');
@@ -133,8 +134,7 @@ test('real PG: a committed POST with a broken 2xx reply is settled by GET',
           assert.equal(await countRows(host), '1');
           await host.bot.stop();
           host.bot = null;
-          const {entries} = JSON.parse(await readFile(
-              join(host.directory, 'ledger.json'), 'utf8'));
+          const {entries} = JSON.parse(await readLedger(host.directory));
           assert.equal(entries[0].state, 'committed');
           assert.equal(entries[0].observations.length, 1);
         });
@@ -185,8 +185,7 @@ test('S3 real PG: enforced API commits bot writes only with the Bearer header',
         assert.equal(await countRows(host), '1');
         await host.bot.stop();
         host.bot = null;
-        const ledger = await readFile(join(host.directory, 'ledger.json'),
-            'utf8');
+        const ledger = await readLedger(host.directory);
         assert.ok(!ledger.includes(API_TOKEN));
       });
       await t.test('adapter without the header fails with HTTP_401',
@@ -201,8 +200,7 @@ test('S3 real PG: enforced API commits bot writes only with the Bearer header',
             assert.equal(host.bot.snapshot().failed, 1);
             await host.bot.stop();
             host.bot = null;
-            const {entries} = JSON.parse(await readFile(
-                join(host.directory, 'ledger.json'), 'utf8'));
+            const {entries} = JSON.parse(await readLedger(host.directory));
             assert.deepEqual(entries.map(({state, lastError}) =>
               [state, lastError]), [['failed', 'HTTP_401']]);
             assert.equal(await countRows(host), '0');

@@ -119,7 +119,7 @@ function lastFatal(stdout) {
   return stdout.trim().split('\n').filter(Boolean).map((line) =>
     JSON.parse(line)).reverse().find((summary) => summary.fatal)?.fatal;
 }
-/** Polls ledger.json until `predicate(entries)` holds; bounded wait. */
+/** Polls the durable ledger until `predicate(entries)` holds; bounded wait. */
 async function waitForLedger(dir, predicate) {
   const deadline = Date.now() + CLI_TIMEOUT_MS;
   while (Date.now() < deadline) {
@@ -209,7 +209,6 @@ test('CLI reports a replaced lock file as fatal LEDGER_LOCK_LOST',
       const dir = await fixture(t);
       const {result} = await startCli({BOT_BASE_URL: await serveStore(t),
         BOT_LEDGER_DIR: dir, BOT_RUN_ID: 'cli_test', BOT_RATE: '20'});
-      const ledgerFile = path.join(dir, 'ledger.json');
       for (;;) {
         const text = await readLedger(dir).catch(() => '');
         if (text && JSON.parse(text).entries.length >= 2) break;
