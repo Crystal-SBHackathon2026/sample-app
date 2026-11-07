@@ -289,3 +289,9 @@ throw new HttpError(503, {notCommitted: true, retryAfterMs: 1000});
 이 오류는 시도 예산을 소모하지 않지만 전체 시간·pending 상한은 유지합니다.
 write_attempts/write_errors 지표에는 계획된 정지503도 실제 HTTP 결과로 포함됩니다.
 정지 구간의 오류율을 장애율로 해석하지 말고 ledger의 WRITES_PAUSED와 비교하세요.
+
+## 누적 원장 조회 비용
+
+상태 집계는 마지막 영속 저장이 성공한 원장의 캐시를 사용하고, 전달 루프는 pending 항목만 복제한다. 이미 완료한 요청 payload 전체를 건강 검사나 10ms 전달 루프마다 복제하지 않는다. 원장 형식·fsync·요청 재처리 의미는 유지한다. 전체 JSON 저장 비용과 최대 원장 한도는 여전히 남아 있다.
+
+Linux 환경에서 `node packages/traffic-bot/bench-read-views.js`로 18,400개 완료 요청의 상태 조회와 빈 전달 반복 비용을 재현할 수 있다. 임시 합성 원장만 사용하며 운영 원장은 변경하지 않는다.

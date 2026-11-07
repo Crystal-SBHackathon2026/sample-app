@@ -76,6 +76,24 @@ async function openLedger({dir, maxPending = 1000,
     throw error;
   }
 
+  // Build read views only after a durable snapshot is published. Polling must
+  // not clone historical payloads at the delivery-loop/health-check frequency.
+  let counts;
+  let pending;
+  function refreshViews() {
+    counts = {pending: 0, accepted_pending: 0, committed: 0, failed: 0,
+      unknown: 0};
+    pending = [];
+    for (const entry of data.entries) {
+      counts[entry.state]++;
+      if (entry.state === 'pending') {
+        pending.push(entry);
+        if (entry.acceptedAt) counts.accepted_pending++;
+      }
+    }
+  }
+  refreshViews();
+
   function checkOpen() {
     if (closed) throw new Error('ledger is closed');
   }
@@ -105,6 +123,7 @@ async function openLedger({dir, maxPending = 1000,
         await directory.close();
       }
       data = next;
+      refreshViews();
     } finally {
       if (handle) await handle.close();
       await fs.rm(temporary, {force: true});
@@ -126,6 +145,12 @@ async function openLedger({dir, maxPending = 1000,
   return {
     entries() {
       return structuredClone(data.entries);
+    },
+    summary() {
+      return {...counts};
+    },
+    pendingEntries() {
+      return structuredClone(pending);
     },
     add(request) {
       return mutate((next) => {

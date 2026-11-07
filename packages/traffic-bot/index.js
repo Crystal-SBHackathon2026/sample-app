@@ -141,15 +141,9 @@ async function createTrafficBot({adapter, ledgerDir, ratePerSecond = 1,
 
   function snapshot() {
     if (finalSnapshot) return structuredClone(finalSnapshot);
-    const entries = ledger.entries();
     return {
       at: new Date().toISOString(), paused, running,
-      pending: entries.filter((entry) => entry.state === 'pending').length,
-      accepted_pending: entries.filter((entry) =>
-        entry.state === 'pending' && entry.acceptedAt).length,
-      committed: entries.filter((entry) => entry.state === 'committed').length,
-      failed: entries.filter((entry) => entry.state === 'failed').length,
-      unknown: entries.filter((entry) => entry.state === 'unknown').length,
+      ...ledger.summary(),
       ...counters, fatal: fatalCode,
       latency_ms: {p95: percentile(latencies, 0.95),
         p99: percentile(latencies, 0.99), max: Math.max(0, ...latencies)},
@@ -371,7 +365,7 @@ async function createTrafficBot({adapter, ledgerDir, ratePerSecond = 1,
   function processPending() {
     if (processing) return processing;
     processing = (async () => {
-      for (const entry of ledger.entries()) {
+      for (const entry of ledger.pendingEntries()) {
         if (stopped || paused) break;
         if (entry.state === 'pending' && entry.nextAttemptAt <= Date.now()) {
           await processEntry(entry);
@@ -417,7 +411,7 @@ async function createTrafficBot({adapter, ledgerDir, ratePerSecond = 1,
         while (!stopped && running) {
           const started = Date.now();
           try {
-            if (snapshot().pending >= maxPending) {
+            if (ledger.summary().pending >= maxPending) {
               counters.generation_blocked++;
             } else {
               await generate();
