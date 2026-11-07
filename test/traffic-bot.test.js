@@ -1,3 +1,4 @@
+const {readLedger} = require('./bot-ledger-reader');
 const {test} = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
@@ -39,7 +40,7 @@ async function readBody(req) {
   return body;
 }
 async function savedEntries(dir) {
-  return JSON.parse(await fs.readFile(path.join(dir, 'ledger.json'))).entries;
+  return JSON.parse(await readLedger(dir)).entries;
 }
 async function writeLedger(dir, entries) {
   await fs.writeFile(path.join(dir, 'ledger.json'),
@@ -67,7 +68,7 @@ test('ledger persists requests before send and resumes pending after reopen',
       assert.equal(bot.snapshot().committed, 1);
       await bot.stop();
       const saved = JSON.parse(
-          await fs.readFile(path.join(dir, 'ledger.json')));
+          await readLedger(dir));
       assert.deepEqual(saved.entries[0].request, request);
       assert.equal(saved.entries[0].state, 'committed');
       assert.equal(saved.entries[0].observations[0].environment, 'local');
@@ -497,7 +498,7 @@ test('request age and record limits fail visibly without sending new bodies',
       assert.equal(writes, 0);
       await bot.stop();
       const saved = JSON.parse(
-          await fs.readFile(path.join(dir, 'ledger.json')));
+          await readLedger(dir));
       assert.equal(saved.entries[0].lastError, 'REQUEST_EXPIRED');
     });
 
@@ -536,6 +537,8 @@ test('default 8MiB size limit rejects oversized ledgers; persist is timed',
       await assert.rejects(ledger.add({...record(), payload}),
           /size limit/);
       await ledger.close();
+      await fs.rm(path.join(dir, 'ledger.sqlite'));
+      await writeLedger(dir, entries);
       await fs.appendFile(path.join(dir, 'ledger.json'),
           ' '.repeat(8 * MIB - size + 1));
       await assert.rejects(openLedger({dir}), /size limit/);
@@ -649,7 +652,7 @@ test('paused pending capacity applies backpressure and resumes without loss',
       await bot.stop();
       assert.equal(bot.snapshot().fatal, null);
       const saved = JSON.parse(
-          await fs.readFile(path.join(dir, 'ledger.json')));
+          await readLedger(dir));
       assert.equal(saved.entries.length,
           bot.snapshot().committed + bot.snapshot().pending);
       assert.equal(bot.snapshot().failed, 0);
@@ -683,7 +686,8 @@ test('corrupt persisted scheduling state is rejected, never forever pending',
       await ledger.add(record());
       await ledger.close();
       const file = path.join(dir, 'ledger.json');
-      const original = JSON.parse(await fs.readFile(file));
+      const original = JSON.parse(await readLedger(dir));
+      await fs.rm(path.join(dir, 'ledger.sqlite'));
       for (const value of [null, -1, 'tomorrow', 1.5, undefined]) {
         const corrupt = structuredClone(original);
         corrupt.entries[0].nextAttemptAt = value;
@@ -763,6 +767,5 @@ test('generic HTTP 503 remains ambiguous and consumes the attempt budget',
       assert.equal(writes, 2);
       assert.equal(bot.snapshot().unknown, 1);
       await bot.stop();
-      assert.doesNotMatch(await fs.readFile(path.join(dir, 'ledger.json'),
-          'utf8'), /must not be persisted/);
+      assert.doesNotMatch(await readLedger(dir), /must not be persisted/);
     });

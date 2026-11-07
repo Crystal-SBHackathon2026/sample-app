@@ -1,9 +1,10 @@
 const fs = require('node:fs/promises');
 const path = require('node:path');
+const {DatabaseSync} = require('node:sqlite');
 const {randomUUID} = require('node:crypto');
 const {acquireOwnerLock} = require('./owner-lock');
 
-// A JSON snapshot rewrites the whole file per change, so keep it bounded.
+// Limits cover retained evidence; completed records are not polled or rewritten.
 const DEFAULT_MAX_RECORDS = 10000;
 const DEFAULT_MAX_LEDGER_BYTES = 8 * 1024 * 1024;
 
@@ -31,6 +32,7 @@ async function openLedger({dir, maxPending = 1000,
   const lock = await acquireOwnerLock(dir, {runId});
   const filename = path.join(dir, 'ledger.json');
   let data;
+  let db;
   let closed = false;
   let queue = Promise.resolve();
   try {
@@ -40,15 +42,21 @@ async function openLedger({dir, maxPending = 1000,
         await fs.rm(path.join(dir, name), {force: true});
       }
     }
+    const dbPath = path.join(dir, 'ledger.sqlite');
+    db = new DatabaseSync(dbPath);
+    await fs.chmod(dbPath, 0o600);
+    db.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA wal_autocheckpoint=128;');
+    db.exec('CREATE TABLE IF NOT EXISTS entries (id TEXT PRIMARY KEY, body TEXT NOT NULL); CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);');
+    const initialized = db.prepare("SELECT value FROM metadata WHERE key='version'").get();
+    if (initialized && initialized.value !== '2') throw new Error('unsupported ledger version');
     const stat = await fs.stat(filename).catch((error) => {
       if (error.code === 'ENOENT') return null;
       throw error;
     });
-    if (stat && stat.size > maxLedgerBytes) {
+    if (!initialized && stat && stat.size > maxLedgerBytes) {
       throw new Error('ledger size limit exceeded');
     }
-    data = stat ? JSON.parse(await fs.readFile(filename, 'utf8')) :
-      {version: 1, entries: []};
+    data = initialized ? {version: 1, entries: db.prepare('SELECT body FROM entries ORDER BY rowid').all().map(r => JSON.parse(r.body))} : stat ? JSON.parse(await fs.readFile(filename, 'utf8')) : {version: 1, entries: []};
     if (data.version !== 1 || !Array.isArray(data.entries)) {
       throw new Error('unsupported or corrupt ledger');
     }
@@ -71,126 +79,131 @@ async function openLedger({dir, maxPending = 1000,
       }
       ids.add(entry.request.request_id);
     }
+    if (!initialized) {
+      db.exec('BEGIN IMMEDIATE');
+      try {
+        const insert = db.prepare('INSERT INTO entries(id,body) VALUES(?,?)');
+        for (const e of data.entries) insert.run(e.request.request_id, JSON.stringify(e));
+        db.prepare("INSERT INTO metadata VALUES('version','2')").run();
+        db.exec('COMMIT');
+      } catch (e) { db.exec('ROLLBACK'); throw e; }
+    }
+    // Prevent old binaries from silently reading stale JSON after conversion.
+    // Backup and marker are durable before the first new SQLite mutation.
+    if (stat) {
+      const old = await fs.readFile(filename, 'utf8');
+      if (JSON.parse(old).version === 1) {
+        const backup = path.join(dir, 'ledger.v1.backup.json');
+        try { await fs.writeFile(backup, old, {flag: 'wx', mode: 0o600}); }
+        catch (e) {
+          if (e.code !== 'EEXIST' || await fs.readFile(backup, 'utf8') !== old) throw e;
+        }
+        const h = await fs.open(backup, 'r');
+        try { await h.sync(); } finally { await h.close(); }
+      }
+    }
+    const marker = path.join(dir, `.ledger-${randomUUID()}.tmp`);
+    const h = await fs.open(marker, 'wx', 0o600);
+    try {
+      await h.writeFile(JSON.stringify({version: 2, storage: 'ledger.sqlite'}));
+      await h.sync();
+    } finally { await h.close(); }
+    await lock.assertHeld();
+    await fs.rename(marker, filename);
+    // Commit the directory entry too before acknowledging any request.
+    const directory = await fs.open(dir, 'r');
+    try { await directory.sync(); } finally { await directory.close(); }
   } catch (error) {
+    if (db) db.close();
     await lock.release();
     throw error;
   }
 
-  // Build read views only after a durable snapshot is published. Polling must
-  // not clone historical payloads at the delivery-loop/health-check frequency.
-  let counts;
-  let pending;
-  function refreshViews() {
-    counts = {pending: 0, accepted_pending: 0, committed: 0, failed: 0,
-      unknown: 0};
-    pending = [];
-    for (const entry of data.entries) {
-      counts[entry.state]++;
-      if (entry.state === 'pending') {
-        pending.push(entry);
-        if (entry.acceptedAt) counts.accepted_pending++;
-      }
+  const records = new Map(data.entries.map(e => [e.request.request_id, e]));
+  const pending = new Map();
+  const counts = {pending: 0, accepted_pending: 0, committed: 0, failed: 0, unknown: 0};
+  let bytes = Buffer.byteLength(JSON.stringify({version: 1, entries: []}));
+  for (const e of records.values()) {
+    bytes += Buffer.byteLength(JSON.stringify(e)) + 1;
+    counts[e.state]++;
+    if (e.state === 'pending') {
+      pending.set(e.request.request_id, e);
+      if (e.acceptedAt) counts.accepted_pending++;
     }
   }
-  refreshViews();
-
+  let recordCount = records.size;
+  records.clear();
+  data = null;
+  const find = db.prepare('SELECT body FROM entries WHERE id=?');
+  const get = id => { const row = find.get(id); return row ? JSON.parse(row.body) : undefined; };
+  if (bytes > maxLedgerBytes) {
+    db.close(); await lock.release(); throw new Error('ledger size limit exceeded');
+  }
+  const save = db.prepare('INSERT INTO entries(id,body) VALUES(?,?) ON CONFLICT(id) DO UPDATE SET body=excluded.body');
   function checkOpen() {
     if (closed) throw new Error('ledger is closed');
   }
-
-  async function persist(next) {
-    checkOpen();
-    const serialized = JSON.stringify(next);
-    if (Buffer.byteLength(serialized) > maxLedgerBytes) {
-      throw new Error('ledger size limit exceeded');
-    }
-    const temporary = path.join(dir, `.ledger-${randomUUID()}.tmp`);
-    let handle;
-    try {
-      handle = await fs.open(temporary, 'wx', 0o600);
-      await handle.writeFile(serialized);
-      await handle.sync();
-      await handle.close();
-      handle = null;
-      checkOpen();
-      // Never publish a snapshot after the lock file was swapped or removed.
-      await lock.assertHeld();
-      await fs.rename(temporary, filename);
-      const directory = await fs.open(dir, 'r');
-      try {
-        await directory.sync();
-      } finally {
-        await directory.close();
-      }
-      data = next;
-      refreshViews();
-    } finally {
-      if (handle) await handle.close();
-      await fs.rm(temporary, {force: true});
-    }
-  }
-
-  function mutate(update) {
+  function mutate(make) {
     const operation = queue.then(async () => {
       checkOpen();
-      const next = structuredClone(data);
-      const result = update(next);
-      await persist(next);
-      return result;
+      const entry = make();
+      const id = entry.request.request_id;
+      const previous = get(id);
+      const body = JSON.stringify(entry);
+      const nextBytes = bytes + Buffer.byteLength(body) + (previous ?
+        -Buffer.byteLength(JSON.stringify(previous)) : 1);
+      if (nextBytes > maxLedgerBytes) throw new Error('ledger size limit exceeded');
+      await lock.assertHeld();
+      // SQLite commits only this row, with FULL durability, before publishing
+      // state to the delivery loop. A failed transaction leaves views unchanged.
+      save.run(id, body);
+      if (previous) {
+        counts[previous.state]--;
+        if (previous.state === 'pending' && previous.acceptedAt) counts.accepted_pending--;
+      }
+      counts[entry.state]++;
+      if (!previous) recordCount++;
+      pending.delete(id);
+      if (entry.state === 'pending') {
+        pending.set(id, entry);
+        if (entry.acceptedAt) counts.accepted_pending++;
+      }
+      bytes = nextBytes;
     });
     queue = operation.catch(() => {});
     return operation;
   }
-
   return {
-    entries() {
-      return structuredClone(data.entries);
-    },
-    summary() {
-      return {...counts};
-    },
-    pendingEntries() {
-      return structuredClone(pending);
-    },
+    entries() { return db.prepare('SELECT body FROM entries ORDER BY rowid').all().map(r => JSON.parse(r.body)); },
+    summary() { return {...counts}; },
+    pendingEntries() { return structuredClone([...pending.values()]); },
     add(request) {
-      return mutate((next) => {
-        if (next.entries.some((entry) =>
-          entry.request.request_id === request.request_id)) {
-          throw new Error('request ID already exists in ledger');
-        }
-        if (next.entries.length >= maxRecords) {
-          throw new Error('ledger record limit exceeded');
-        }
-        if (next.entries.filter((entry) => entry.state === 'pending').length >=
-            maxPending) {
+      return mutate(() => {
+        if (find.get(request.request_id)) throw new Error('request ID already exists in ledger');
+        if (recordCount >= maxRecords) throw new Error('ledger record limit exceeded');
+        if (pending.size >= maxPending) {
           const error = new Error('ledger pending queue limit exceeded');
-          error.code = 'PENDING_LIMIT';
-          throw error;
+          error.code = 'PENDING_LIMIT'; throw error;
         }
-        next.entries.push({request: structuredClone(request), state: 'pending',
-          attempts: 0, enqueuedAt: Date.now(), nextAttemptAt: 0,
-          observations: []});
+        return {request: structuredClone(request), state: 'pending', attempts: 0,
+          enqueuedAt: Date.now(), nextAttemptAt: 0, observations: []};
       });
     },
     update(id, changes) {
-      return mutate((next) => {
-        const entry = next.entries.find((item) =>
-          item.request.request_id === id);
+      return mutate(() => {
+        const entry = get(id);
         if (!entry) throw new Error('unknown request ID');
         for (const key of Object.keys(changes)) {
           if (!['state', 'attempts', 'nextAttemptAt', 'completedAt',
-            'lastError', 'observations', 'acceptedAt'].includes(key)) {
-            throw new Error('immutable ledger field');
-          }
+            'lastError', 'observations', 'acceptedAt'].includes(key)) throw new Error('immutable ledger field');
         }
-        Object.assign(entry, structuredClone(changes));
+        return {...entry, ...structuredClone(changes)};
       });
     },
     async close() {
       if (closed) return;
-      await queue;
-      closed = true;
-      await lock.release();
+      await queue; closed = true;
+      try { db.close(); } finally { await lock.release(); }
     },
   };
 }

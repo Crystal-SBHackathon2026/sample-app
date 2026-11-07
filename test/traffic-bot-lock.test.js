@@ -1,3 +1,4 @@
+const {readLedger} = require('./bot-ledger-reader');
 // Kernel flock ownership of the bot ledger. These tests need Linux (or a
 // compatible flock(1)); run them in the pinned node:22 Linux image.
 const {test} = require('node:test');
@@ -40,7 +41,7 @@ async function fixture(t) {
 }
 async function savedIds(dir) {
   const {entries} = JSON.parse(
-      await fs.readFile(path.join(dir, 'ledger.json')));
+      await readLedger(dir));
   return entries.map((entry) => entry.request.request_id);
 }
 /** Reads every regular file in dir so a test can prove nothing changed. */
@@ -195,11 +196,11 @@ test('replacing or removing the lock file fails the next persist as LOST',
           const dir = await fixture(t);
           const ledger = await openLedger({dir});
           await ledger.add(record());
-          const before = await fs.readFile(path.join(dir, 'ledger.json'));
+          const before = await readLedger(dir);
           await change(path.join(dir, LOCK_FILE));
           await assert.rejects(ledger.add(record()),
               {code: 'LEDGER_LOCK_LOST'});
-          assert.deepEqual(await fs.readFile(path.join(dir, 'ledger.json')),
+          assert.deepEqual(await readLedger(dir),
               before);
           assert.deepEqual((await fs.readdir(dir)).filter((file) =>
             file.endsWith('.tmp')), []);

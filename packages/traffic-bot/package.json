@@ -5,6 +5,6 @@
   "main": "index.js",
   "exports": {".": "./index.js"},
   "bin": {"ghost-traffic-bot": "bin/traffic-bot.js"},
-  "engines": {"node": ">=22"},
+  "engines": {"node": ">=22.13"},
   "files": ["*.js", "bin", "README.md"]
 }

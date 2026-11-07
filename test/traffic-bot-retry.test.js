@@ -1,3 +1,4 @@
+const {readLedger} = require('./bot-ledger-reader');
 const {test} = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
@@ -41,7 +42,7 @@ async function fixture(t, respond, options = {}) {
     get bot() { return bot; }, request, dir,
     advance(ms = 10) { now += ms; },
     async entry() {
-      const data = JSON.parse(await fs.readFile(path.join(dir, 'ledger.json')));
+      const data = JSON.parse(await readLedger(dir));
       return data.entries[0];
     },
     async reopen() {
