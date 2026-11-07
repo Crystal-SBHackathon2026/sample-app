@@ -1,3 +1,4 @@
+const {readLedger} = require('./bot-ledger-reader');
 const {test} = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
@@ -55,6 +56,6 @@ test('a failed persistence does not publish tentative counts or pending data', a
   }), /size limit/);
   assert.deepEqual(ledger.summary(), before);
   assert.equal(ledger.pendingEntries()[0].state, 'pending');
-  const saved = JSON.parse(await fs.readFile(path.join(dir, 'ledger.json')));
+  const saved = JSON.parse(await readLedger(dir));
   assert.equal(saved.entries[0].state, 'pending');
 });

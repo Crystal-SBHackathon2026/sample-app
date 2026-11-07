@@ -1,3 +1,4 @@
+const {readLedger} = require('./bot-ledger-reader');
 // Runs the bot CLI as an operator would. The ledger lock needs Linux (or a
 // compatible flock(1)); run these in the pinned node:22 Linux image.
 const {test} = require('node:test');
@@ -122,7 +123,7 @@ function lastFatal(stdout) {
 async function waitForLedger(dir, predicate) {
   const deadline = Date.now() + CLI_TIMEOUT_MS;
   while (Date.now() < deadline) {
-    const text = await fs.readFile(path.join(dir, 'ledger.json'), 'utf8')
+    const text = await readLedger(dir)
         .catch(() => '');
     if (text && predicate(JSON.parse(text).entries)) {
       return JSON.parse(text).entries;
@@ -210,7 +211,7 @@ test('CLI reports a replaced lock file as fatal LEDGER_LOCK_LOST',
         BOT_LEDGER_DIR: dir, BOT_RUN_ID: 'cli_test', BOT_RATE: '20'});
       const ledgerFile = path.join(dir, 'ledger.json');
       for (;;) {
-        const text = await fs.readFile(ledgerFile, 'utf8').catch(() => '');
+        const text = await readLedger(dir).catch(() => '');
         if (text && JSON.parse(text).entries.length >= 2) break;
         await new Promise((resolve) => setTimeout(resolve, 20));
       }
@@ -252,7 +253,7 @@ test('CLI default record limit stops generation at 10000 entries',
       assert.equal(code, 1);
       assert.equal(lastFatal(stdout), 'LEDGER_GENERATION_LIMIT_OR_IO_ERROR');
       const saved = JSON.parse(
-          await fs.readFile(path.join(dir, 'ledger.json')));
+          await readLedger(dir));
       assert.equal(saved.entries.length, 10000);
     });
 
@@ -394,7 +395,7 @@ test('B2 CLI sends the Bearer token on every POST and GET over loopback',
           for (const {authorization} of traffic.requests) {
             assert.equal(authorization, `Bearer ${token}`);
           }
-          const ledger = await fs.readFile(path.join(dir, 'ledger.json'));
+          const ledger = await readLedger(dir);
           assert.ok(!`${stdout}${stderr}${ledger}`.includes(token));
         });
       }
@@ -436,7 +437,7 @@ test('B5 CLI records a rejected token as failed HTTP_401 without the secret',
       const {stdout, stderr} = await runUntil({BOT_BASE_URL: baseUrl,
         BOT_LEDGER_DIR: dir, BOT_RUN_ID: 'cli_test', BOT_API_TOKEN: token},
       (entries) => entries.some((entry) => entry.state === 'failed'));
-      const ledger = await fs.readFile(path.join(dir, 'ledger.json'), 'utf8');
+      const ledger = await readLedger(dir);
       const failed = JSON.parse(ledger).entries.filter(
           ({state}) => state === 'failed');
       assert.ok(failed.length >= 1);
